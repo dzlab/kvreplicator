@@ -1,4 +1,3 @@
-```go
 package kvreplicator
 
 import (
@@ -20,7 +19,7 @@ type rocksDBFSM struct {
 
 	// For demonstration, we'll use a simple in-memory map.
 	// In a real implementation, this would interact with RocksDB.
-	data map[string]string
+	data   map[string]string
 	logger *log.Logger
 }
 
@@ -278,4 +277,3 @@ func (fsm *rocksDBFSM) Close() error {
 	fsm.logger.Println("FSM closed.")
 	return nil
 }
-```

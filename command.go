@@ -1,4 +1,3 @@
-```go
 package kvreplicator
 
 import (
@@ -40,4 +39,3 @@ func DeserializeCommand(data []byte) (*Command, error) {
 	}
 	return &cmd, nil
 }
-```

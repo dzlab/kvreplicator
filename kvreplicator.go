@@ -1,4 +1,3 @@
-```go
 package kvreplicator
 
 import (
@@ -15,9 +14,9 @@ import (
 )
 
 const (
-	defaultApplyTimeout       = 10 * time.Second
+	defaultApplyTimeout        = 10 * time.Second
 	defaultRetainSnapshotCount = 2
-	defaultRaftLogCacheSize   = 512
+	defaultRaftLogCacheSize    = 512
 )
 
 // Config holds the configuration for the KVReplicator.
@@ -162,7 +161,6 @@ func (kv *KVReplicator) Start() error {
 			kv.logger.Printf("ERROR: could not add self as voter (future error): %v", err)
 		}
 
-
 		// The proper way to join is by calling raft.Join on one of the existing nodes.
 		// This is typically an RPC call to an existing leader to add this node.
 		// For simplicity, the hashicorp/raft library expects this to be coordinated externally
@@ -196,7 +194,6 @@ func (kv *KVReplicator) Start() error {
 	} else if !kv.config.Bootstrap {
 		kv.logger.Printf("INFO: Starting node. Will attempt to discover existing cluster or wait to be added.")
 	}
-
 
 	kv.logger.Printf("KVReplicator started. Node ID: %s, Raft Address: %s", kv.config.NodeID, kv.config.RaftBindAddress)
 	return nil
@@ -377,4 +374,3 @@ func (kv *KVReplicator) RemoveServer(serverID string) error {
 	kv.logger.Printf("Successfully removed server: ID=%s", serverID)
 	return nil
 }
-```

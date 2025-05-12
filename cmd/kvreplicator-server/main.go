@@ -1,4 +1,3 @@
-```go
 package main
 
 import (
@@ -16,13 +15,13 @@ import (
 )
 
 var (
-	nodeID          string
-	raftBindAddr    string
-	raftDataDir     string
-	rocksDBDataDir  string
+	nodeID           string
+	raftBindAddr     string
+	raftDataDir      string
+	rocksDBDataDir   string
 	bootstrapCluster bool
-	joinAddrStr     string
-	httpAddr        string
+	joinAddrStr      string
+	httpAddr         string
 )
 
 func init() {
@@ -237,4 +236,3 @@ func setupHTTPServer(addr string, store *kvreplicator.KVReplicator, logger *log.
 		}
 	}()
 }
-```
