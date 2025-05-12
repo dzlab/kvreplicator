@@ -8,10 +8,23 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/raft"
 )
+
+// generateLocalSnapshotID is a helper to create a unique snapshot ID.
+// This replicates the logic from github.com/hashicorp/raft.GenerateSnapshotID
+// if it's not found by the compiler for any reason.
+func generateLocalSnapshotID() (string, error) {
+	id, err := uuid.GenerateUUID()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%d-%s", time.Now().UnixNano(), id), nil
+}
 
 // pebbleFSM implements the raft.FSM interface, applying commands to Pebble.
 type pebbleFSM struct {
@@ -106,7 +119,12 @@ func (fsm *pebbleFSM) Snapshot() (raft.FSMSnapshot, error) {
 	// Create a temporary directory for the checkpoint.
 	// Suffix with something unique or clean up carefully.
 	// Raft snapshot IDs could be part of this. For now, a generic name.
-	checkpointDir := filepath.Join(filepath.Dir(fsm.dbPath), fmt.Sprintf("%s_snapshot_tmp_%d", filepath.Base(fsm.dbPath), raft.GenerateSnapshotID()))
+	snapshotID, err := generateLocalSnapshotID()
+	if err != nil {
+		fsm.logger.Printf("ERROR: failed to generate snapshot ID: %v", err)
+		return nil, fmt.Errorf("failed to generate snapshot ID: %w", err)
+	}
+	checkpointDir := filepath.Join(filepath.Dir(fsm.dbPath), fmt.Sprintf("%s_snapshot_tmp_%s", filepath.Base(fsm.dbPath), snapshotID))
 
 	// Ensure old temp checkpoint dir is removed if it exists
 	if err := os.RemoveAll(checkpointDir); err != nil {
@@ -115,7 +133,7 @@ func (fsm *pebbleFSM) Snapshot() (raft.FSMSnapshot, error) {
 	}
 
 
-	err := fsm.db.Checkpoint(checkpointDir)
+	err = fsm.db.Checkpoint(checkpointDir)
 	if err != nil {
 		fsm.logger.Printf("ERROR: failed to create Pebble checkpoint at %s: %v", checkpointDir, err)
 		return nil, fmt.Errorf("pebble checkpoint failed: %w", err)
