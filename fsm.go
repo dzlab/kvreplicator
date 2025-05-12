@@ -1,84 +1,91 @@
 package kvreplicator
 
 import (
+	"archive/tar"
 	"fmt"
 	"io"
-	"log" // Or your preferred logging library
+	"log"
+	"os"
+	"path/filepath"
 	"sync"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/hashicorp/raft"
-	// You would import your RocksDB Go wrapper here, e.g.:
-	// "github.com/tecbot/gorocksdb"
 )
 
-// rocksDBFSM implements the raft.FSM interface, applying commands to RocksDB.
-type rocksDBFSM struct {
-	mu sync.Mutex
-	// db *gorocksdb.DB // Placeholder for the actual RocksDB instance
-	// dbPath string     // Path to the RocksDB data directory
-
-	// For demonstration, we'll use a simple in-memory map.
-	// In a real implementation, this would interact with RocksDB.
-	data   map[string]string
+// pebbleFSM implements the raft.FSM interface, applying commands to Pebble.
+type pebbleFSM struct {
+	mu     sync.Mutex
+	db     *pebble.DB
+	dbPath string // Path to the Pebble data directory
 	logger *log.Logger
 }
 
-// newRocksDBFSM creates a new FSM.
-// In a real scenario, 'dbPath' would be used to open/create the RocksDB instance.
-func newRocksDBFSM(logger *log.Logger) *rocksDBFSM {
-	// In a real implementation:
-	// opts := gorocksdb.NewDefaultOptions()
-	// opts.SetCreateIfMissing(true)
-	// db, err := gorocksdb.OpenDb(opts, dbPath)
-	// if err != nil {
-	// 	 logger.Fatalf("failed to open rocksdb: %v", err)
-	// }
-	return &rocksDBFSM{
-		data:   make(map[string]string),
-		logger: logger,
-		// db: db,
-		// dbPath: dbPath,
+// newPebbleFSM creates a new FSM.
+func newPebbleFSM(dbPath string, logger *log.Logger) (*pebbleFSM, error) {
+	if logger == nil {
+		logger = log.New(os.Stderr, "[pebbleFSM] ", log.LstdFlags|log.Lmicroseconds)
 	}
+	if dbPath == "" {
+		return nil, fmt.Errorf("dbPath cannot be empty")
+	}
+
+	// Ensure the DB path exists
+	if err := os.MkdirAll(dbPath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create pebble db path %s: %w", dbPath, err)
+	}
+
+	opts := &pebble.Options{
+		// Logger: pebbleLoggerAdapter(logger), // Pebble expects a specific logger interface
+		// For now, use Pebble's default logger or nil.
+		// Consider adding a proper adapter if detailed Pebble logs are needed through raft's logger.
+	}
+
+	db, err := pebble.Open(dbPath, opts)
+	if err != nil {
+		logger.Printf("ERROR: failed to open pebble db at %s: %v", dbPath, err)
+		return nil, fmt.Errorf("failed to open pebble db: %w", err)
+	}
+	logger.Printf("Pebble DB opened successfully at %s", dbPath)
+
+	return &pebbleFSM{
+		db:     db,
+		dbPath: dbPath,
+		logger: logger,
+	}, nil
 }
 
 // Apply applies a Raft log entry to the key-value store.
-func (fsm *rocksDBFSM) Apply(logEntry *raft.Log) interface{} {
+func (fsm *pebbleFSM) Apply(logEntry *raft.Log) interface{} {
 	fsm.mu.Lock()
 	defer fsm.mu.Unlock()
 
 	cmd, err := DeserializeCommand(logEntry.Data)
 	if err != nil {
 		fsm.logger.Printf("ERROR: failed to deserialize command: %v", err)
-		// Returning an error here can signal to Raft that the command failed.
-		// Depending on the Raft configuration, this might lead to retries or other behavior.
 		return fmt.Errorf("deserialize command: %w", err)
 	}
 
 	fsm.logger.Printf("Applying command: Op=%s, Key=%s", cmd.Op, cmd.Key)
 
-	// In a real implementation, you would use RocksDB operations:
-	// writeOpts := gorocksdb.NewDefaultWriteOptions()
-	// defer writeOpts.Destroy()
-	// readOpts := gorocksdb.NewDefaultReadOptions()
-	// defer readOpts.Destroy()
+	writeOpts := pebble.Sync // Ensure data is flushed to disk
 
 	switch cmd.Op {
 	case OpPut:
-		// err = fsm.db.Put(writeOpts, []byte(cmd.Key), []byte(cmd.Value))
-		// if err != nil {
-		// 	 fsm.logger.Printf("ERROR: RocksDB Put failed: %v", err)
-		// 	 return err
-		// }
-		fsm.data[cmd.Key] = cmd.Value
+		err = fsm.db.Set([]byte(cmd.Key), []byte(cmd.Value), writeOpts)
+		if err != nil {
+			fsm.logger.Printf("ERROR: Pebble Set failed for Key=%s: %v", cmd.Key, err)
+			return err
+		}
 		fsm.logger.Printf("PUT: Key=%s, Value=%s", cmd.Key, cmd.Value)
 		return nil // Return nil on success
 	case OpDelete:
-		// err = fsm.db.Delete(writeOpts, []byte(cmd.Key))
-		// if err != nil {
-		// 	 fsm.logger.Printf("ERROR: RocksDB Delete failed: %v", err)
-		// 	 return err
-		// }
-		delete(fsm.data, cmd.Key)
+		err = fsm.db.Delete([]byte(cmd.Key), writeOpts)
+		if err != nil {
+			// Pebble's Delete doesn't error if key not found, it's a successful deletion of nothing.
+			fsm.logger.Printf("ERROR: Pebble Delete failed for Key=%s: %v", cmd.Key, err)
+			return err
+		}
 		fsm.logger.Printf("DELETE: Key=%s", cmd.Key)
 		return nil // Return nil on success
 	default:
@@ -89,191 +96,247 @@ func (fsm *rocksDBFSM) Apply(logEntry *raft.Log) interface{} {
 }
 
 // Snapshot returns a snapshot of the current state.
-// For RocksDB, this would involve creating a RocksDB checkpoint or iterating over keys.
-func (fsm *rocksDBFSM) Snapshot() (raft.FSMSnapshot, error) {
+// For Pebble, this involves creating a Pebble checkpoint.
+func (fsm *pebbleFSM) Snapshot() (raft.FSMSnapshot, error) {
 	fsm.mu.Lock()
 	defer fsm.mu.Unlock()
 
-	fsm.logger.Println("Creating FSM snapshot")
+	fsm.logger.Println("Creating FSM snapshot (Pebble checkpoint)")
 
-	// In a real RocksDB implementation, you'd create a checkpoint or iterate
-	// through the DB and serialize it. For this example, we'll copy the in-memory map.
-	// This is a simplified snapshot for demonstration.
-	// A real RocksDB snapshot would be more complex to avoid holding the lock for too long.
+	// Create a temporary directory for the checkpoint.
+	// Suffix with something unique or clean up carefully.
+	// Raft snapshot IDs could be part of this. For now, a generic name.
+	checkpointDir := filepath.Join(filepath.Dir(fsm.dbPath), fmt.Sprintf("%s_snapshot_tmp_%d", filepath.Base(fsm.dbPath), raft.GenerateSnapshotID()))
 
-	// Create a copy of the data to avoid race conditions
-	dataCopy := make(map[string]string)
-	for k, v := range fsm.data {
-		dataCopy[k] = v
+	// Ensure old temp checkpoint dir is removed if it exists
+	if err := os.RemoveAll(checkpointDir); err != nil {
+		fsm.logger.Printf("WARN: failed to remove old temp checkpoint dir %s: %v", checkpointDir, err)
+		// Continue, Checkpoint might fail if dir exists and is not empty
 	}
 
-	return &rocksDBFSMSnapshot{
-		data:   dataCopy,
-		logger: fsm.logger,
+
+	err := fsm.db.Checkpoint(checkpointDir)
+	if err != nil {
+		fsm.logger.Printf("ERROR: failed to create Pebble checkpoint at %s: %v", checkpointDir, err)
+		return nil, fmt.Errorf("pebble checkpoint failed: %w", err)
+	}
+
+	fsm.logger.Printf("Pebble checkpoint created successfully at %s", checkpointDir)
+
+	return &pebbleFSMSnapshot{
+		checkpointDir: checkpointDir,
+		logger:        fsm.logger,
 	}, nil
 }
 
-// Restore restores the FSM to a previous state.
-// For RocksDB, this might involve clearing the current DB and loading data from the snapshot.
-func (fsm *rocksDBFSM) Restore(rc io.ReadCloser) error {
+// Restore restores the FSM to a previous state from a snapshot.
+// For Pebble, this involves clearing the current DB and loading data from the checkpoint archive.
+func (fsm *pebbleFSM) Restore(rc io.ReadCloser) error {
 	fsm.mu.Lock()
 	defer fsm.mu.Unlock()
+	defer rc.Close()
 
-	fsm.logger.Println("Restoring FSM from snapshot")
+	fsm.logger.Println("Restoring FSM from Pebble snapshot")
 
-	// In a real RocksDB implementation, you would deserialize the snapshot data
-	// (e.g., from a RocksDB checkpoint backup or a serialized key-value stream)
-	// and write it into the database. This often involves clearing existing data first.
+	// 1. Close the current Pebble DB
+	if err := fsm.db.Close(); err != nil {
+		fsm.logger.Printf("ERROR: failed to close Pebble DB before restore: %v", err)
+		return fmt.Errorf("failed to close current db for restore: %w", err)
+	}
+	fsm.logger.Println("Current Pebble DB closed.")
 
-	// For this example with an in-memory map:
-	// We'll assume the snapshot is a serialized version of our Command struct,
-	// representing a series of Puts to rebuild the state.
-	// A more robust snapshot format would be used in a real system (e.g., JSON, gob of the map).
+	// 2. Clean existing DB directory
+	fsm.logger.Printf("Removing existing Pebble DB directory: %s", fsm.dbPath)
+	if err := os.RemoveAll(fsm.dbPath); err != nil {
+		fsm.logger.Printf("ERROR: failed to remove existing Pebble DB directory %s: %v", fsm.dbPath, err)
+		// Try to reopen the original DB if we can't proceed with restore.
+		if _, openErr := newPebbleFSM(fsm.dbPath, fsm.logger); openErr != nil {
+			fsm.logger.Printf("FATAL: Could not remove old DB dir and could not reopen DB %s: %v", fsm.dbPath, openErr)
+		}
+		return fmt.Errorf("failed to remove existing db directory %s: %w", fsm.dbPath, err)
+	}
 
-	// This is a highly simplified restore. A real RocksDB restore would be more involved.
-	// For example, it might involve reading a backup file created by RocksDB's checkpoint mechanism.
-	// Here, we'll just clear and repopulate the map based on a simple format read from rc.
-	// We expect a series of Command objects serialized by rocksDBFSMSnapshot.Persist.
+	// 3. Create new (empty) DB directory
+	fsm.logger.Printf("Creating new Pebble DB directory: %s", fsm.dbPath)
+	if err := os.MkdirAll(fsm.dbPath, 0755); err != nil {
+		fsm.logger.Printf("ERROR: failed to create new Pebble DB directory %s: %v", fsm.dbPath, err)
+		return fmt.Errorf("failed to create new db directory %s: %w", fsm.dbPath, err)
+	}
 
-	// newData := make(map[string]string)
-	// This is where you would read the snapshot data from 'rc' and deserialize it.
-	// For RocksDB, this might be a complex process involving checkpoint files or a custom format.
-	// For our simplified in-memory example, let's assume the snapshot is just a JSON stream of commands.
-	// However, the FSMSnapshot.Persist method below uses a custom, simpler format.
+	// 4. Read the archive from rc and extract its contents into fsm.dbPath
+	fsm.logger.Printf("Extracting snapshot archive to %s", fsm.dbPath)
+	tr := tar.NewReader(rc) // Assuming snapshot is a tarball
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break // End of archive
+		}
+		if err != nil {
+			fsm.logger.Printf("ERROR: failed to read tar header from snapshot: %v", err)
+			return fmt.Errorf("failed to read tar header: %w", err)
+		}
 
-	// Let's assume the snapshot is just a series of "key=value" lines for simplicity.
-	// A real implementation would use a more robust serialization format (e.g., gob, protobuf, or json stream).
-	// For now, we'll just log and set the data to an empty map, as the snapshot persistence
-	// is also simplified. A proper implementation would deserialize the data written by Persist.
+		target := filepath.Join(fsm.dbPath, header.Name)
 
-	// Clear current data
-	fsm.data = make(map[string]string)
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if _, err := os.Stat(target); err != nil {
+				if err := os.MkdirAll(target, os.FileMode(header.Mode)); err != nil {
+					fsm.logger.Printf("ERROR: failed to create directory from snapshot %s: %v", target, err)
+					return fmt.Errorf("failed to MkdirAll %s: %w", target, err)
+				}
+			}
+		case tar.TypeReg:
+			outFile, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
+			if err != nil {
+				fsm.logger.Printf("ERROR: failed to create file from snapshot %s: %v", target, err)
+				return fmt.Errorf("failed to create file %s: %w", target, err)
+			}
+			if _, err := io.Copy(outFile, tr); err != nil {
+				outFile.Close()
+				fsm.logger.Printf("ERROR: failed to write file data from snapshot %s: %v", target, err)
+				return fmt.Errorf("failed to copy data to %s: %w", target, err)
+			}
+			outFile.Close()
+		default:
+			fsm.logger.Printf("WARN: unsupported tar entry type %c for file %s in snapshot", header.Typeflag, header.Name)
+		}
+	}
+	fsm.logger.Println("Snapshot archive extracted.")
 
-	// This is a placeholder. A real implementation would read data from 'rc'.
-	// For example, if rocksDBFSMSnapshot.Persist wrote JSON:
-	/*
-	   decoder := json.NewDecoder(rc)
-	   if err := decoder.Decode(&fsm.data); err != nil {
-	       fsm.logger.Printf("ERROR: failed to decode snapshot data: %v", err)
-	       return fmt.Errorf("failed to decode snapshot: %w", err)
-	   }
-	*/
-	// Since our rocksDBFSMSnapshot.Persist is simplified and doesn't write a full map,
-	// this Restore implementation is also simplified.
-	// In a real scenario, Persist and Restore must be compatible.
+	// 5. Re-open Pebble DB
+	opts := &pebble.Options{} // Use same options as in newPebbleFSM
+	var err error
+	fsm.db, err = pebble.Open(fsm.dbPath, opts)
+	if err != nil {
+		fsm.logger.Printf("ERROR: failed to re-open Pebble DB at %s after restore: %v", fsm.dbPath, err)
+		return fmt.Errorf("failed to open pebble db post-restore: %w", err)
+	}
 
-	fsm.logger.Println("FSM restored. (Simplified: data cleared, real restore needed)")
-	// If using RocksDB, you'd load data from a checkpoint or iterate through the snapshot source.
+	fsm.logger.Println("FSM restored successfully from Pebble snapshot.")
 	return nil
 }
 
-// rocksDBFSMSnapshot implements raft.FSMSnapshot.
-type rocksDBFSMSnapshot struct {
-	// In a real RocksDB snapshot, this might be a path to a checkpoint,
-	// or an iterator. For our in-memory example, it's a copy of the data.
-	data   map[string]string
-	logger *log.Logger
+// pebbleFSMSnapshot implements raft.FSMSnapshot.
+type pebbleFSMSnapshot struct {
+	checkpointDir string // Path to the Pebble checkpoint directory
+	logger        *log.Logger
 }
 
 // Persist saves the FSM snapshot. Raft calls this to write the snapshot to a sink.
-func (s *rocksDBFSMSnapshot) Persist(sink raft.SnapshotSink) error {
-	s.logger.Printf("Persisting snapshot to sink ID: %s", sink.ID())
+// For Pebble, this means archiving the checkpoint directory.
+func (s *pebbleFSMSnapshot) Persist(sink raft.SnapshotSink) error {
+	s.logger.Printf("Persisting Pebble snapshot from checkpoint %s to sink ID: %s", s.checkpointDir, sink.ID())
 
-	// In a real RocksDB implementation, you would stream the data from your
-	// checkpoint or database iterator to the sink.
-	// For example, you might iterate over all key-value pairs and write them.
-
-	// For our simplified in-memory example, we'll serialize the map.
-	// A more efficient format like gob or protobuf would be better for production.
-	// We are writing key=value pairs, one per line. This is very basic.
-	// A production system would use a more robust method (e.g., gob encoding the map, or JSON).
 	err := func() error {
-		// Example: Write data as JSON. A real system might use a more compact binary format.
-		// Or, if using RocksDB checkpoints, you might copy checkpoint files to the sink.
-		// For this example, let's imagine writing commands that would recreate the state.
-		for k, v := range s.data {
-			cmd := Command{Op: OpPut, Key: k, Value: v}
-			serializedCmd, err := cmd.Serialize()
+		tw := tar.NewWriter(sink)
+		defer tw.Close()
+
+		// Walk the checkpoint directory and add files to the tar archive.
+		return filepath.Walk(s.checkpointDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
-				return fmt.Errorf("failed to serialize command for snapshot: %w", err)
-			}
-			// Write length of command, then command itself
-			// This is a simple framing mechanism.
-			// lenBytes := make([]byte, 4) // Assuming length fits in uint32
-			// binary.BigEndian.PutUint32(lenBytes, uint32(len(serializedCmd)))
-			// if _, err := sink.Write(lenBytes); err != nil {
-			// 	return fmt.Errorf("failed to write cmd length to sink: %w", err)
-			// }
-			if _, err := sink.Write(serializedCmd); err != nil {
-				return fmt.Errorf("failed to write cmd data to sink: %w", err)
-			}
-			// Add a newline or some delimiter if necessary for your Restore logic
-			if _, err := sink.Write([]byte("\n")); err != nil {
-				return fmt.Errorf("failed to write newline to sink: %w", err)
+				return fmt.Errorf("failure accessing a path %s: %w", path, err)
 			}
 
-		}
-		return nil
+			// Get header for current file/dir
+			header, err := tar.FileInfoHeader(info, info.Name()) // Use info.Name() for symlinks if any, but checkpoint shouldn't have complex ones.
+			if err != nil {
+				return fmt.Errorf("failed to get tar FileInfoHeader for %s: %w", path, err)
+			}
+
+			// Update header.Name to be relative to checkpointDir
+			relPath, err := filepath.Rel(s.checkpointDir, path)
+			if err != nil {
+				return fmt.Errorf("failed to get relative path for %s: %w", path, err)
+			}
+			header.Name = relPath
+
+			if err := tw.WriteHeader(header); err != nil {
+				return fmt.Errorf("failed to write tar header for %s: %w", path, err)
+			}
+
+			// If not a directory, write file content
+			if !info.IsDir() {
+				file, err := os.Open(path)
+				if err != nil {
+					return fmt.Errorf("failed to open file %s for taring: %w", path, err)
+				}
+				defer file.Close()
+				if _, err := io.Copy(tw, file); err != nil {
+					return fmt.Errorf("failed to copy file %s content to tar archive: %w", path, err)
+				}
+			}
+			return nil
+		})
 	}()
 
 	if err != nil {
-		s.logger.Printf("ERROR: failed during snapshot persist: %v", err)
+		s.logger.Printf("ERROR: failed during Pebble snapshot persist (tarring checkpoint %s): %v", s.checkpointDir, err)
 		_ = sink.Cancel() // Attempt to cancel the sink on error
+		// s.Release() // Clean up checkpointDir even on failed persist? Raft might retry. Release is separate.
 		return err
 	}
 
 	// Close the sink to indicate completion.
 	if err := sink.Close(); err != nil {
 		s.logger.Printf("ERROR: failed to close snapshot sink: %v", err)
+		// s.Release() might be called by Raft anyway.
 		return err
 	}
-	s.logger.Println("Snapshot persisted successfully.")
+
+	s.logger.Printf("Pebble snapshot from checkpoint %s persisted successfully.", s.checkpointDir)
 	return nil
 }
 
 // Release is called when Raft is finished with the snapshot.
-func (s *rocksDBFSMSnapshot) Release() {
-	s.logger.Println("Releasing FSM snapshot")
-	// If you had allocated resources for the snapshot (e.g., opened files, DB iterators),
-	// you would release them here. For our in-memory example, there's nothing to do.
-	s.data = nil // Allow GC
+// For Pebble, this means cleaning up the temporary checkpoint directory.
+func (s *pebbleFSMSnapshot) Release() {
+	s.logger.Printf("Releasing FSM snapshot (removing checkpoint directory: %s)", s.checkpointDir)
+	if err := os.RemoveAll(s.checkpointDir); err != nil {
+		s.logger.Printf("ERROR: failed to remove checkpoint directory %s during release: %v", s.checkpointDir, err)
+	} else {
+		s.logger.Printf("Checkpoint directory %s removed successfully.", s.checkpointDir)
+	}
 }
 
-// Get is a helper method to read a value from the FSM's data.
-// This is not part of the raft.FSM interface but useful for the application.
-// In a real system, this would read directly from RocksDB.
-func (fsm *rocksDBFSM) Get(key string) (string, bool) {
+// Get retrieves a value for a given key directly from Pebble.
+func (fsm *pebbleFSM) Get(key string) (string, error) {
+	fsm.mu.Lock() // Although Pebble Get is thread-safe, this ensures consistency if other FSM ops modify state.
+	defer fsm.mu.Unlock()
+
+	valueBytes, closer, err := fsm.db.Get([]byte(key))
+	if err != nil {
+		if err == pebble.ErrNotFound {
+			return "", fmt.Errorf("key not found: %s", key) // Specific error for not found
+		}
+		fsm.logger.Printf("ERROR: Pebble Get failed for key %s: %v", key, err)
+		return "", fmt.Errorf("pebble get for key %s failed: %w", key, err)
+	}
+	defer closer.Close()
+
+	// Make a copy of the valueBytes if it's unsafe to use after closer.Close()
+	// Pebble's documentation implies the slice is valid until closer is closed.
+	// To be safe, copy it.
+	valueStr := string(valueBytes)
+
+	return valueStr, nil
+}
+
+// Close closes the FSM and its underlying Pebble database.
+func (fsm *pebbleFSM) Close() error {
 	fsm.mu.Lock()
 	defer fsm.mu.Unlock()
 
-	// In a real implementation:
-	// readOpts := gorocksdb.NewDefaultReadOptions()
-	// defer readOpts.Destroy()
-	// val, err := fsm.db.Get(readOpts, []byte(key))
-	// if err != nil {
-	//    fsm.logger.Printf("ERROR: RocksDB Get failed for key %s: %v", key, err)
-	//    return "", false
-	// }
-	// if val.Data() == nil { // Key not found
-	//    return "", false
-	// }
-	// valueStr := string(val.Data())
-	// val.Free() // Important to free the C-allocated memory
-	// return valueStr, true
-
-	// Using in-memory map for example:
-	val, ok := fsm.data[key]
-	return val, ok
-}
-
-// Close closes the FSM and its underlying database.
-func (fsm *rocksDBFSM) Close() error {
-	fsm.mu.Lock()
-	defer fsm.mu.Unlock()
-
-	// if fsm.db != nil {
-	// 	fsm.db.Close()
-	// }
-	fsm.logger.Println("FSM closed.")
+	if fsm.db != nil {
+		err := fsm.db.Close()
+		if err != nil {
+			fsm.logger.Printf("ERROR: failed to close Pebble DB: %v", err)
+			return err
+		}
+		fsm.logger.Println("Pebble DB closed.")
+		fsm.db = nil
+	} else {
+		fsm.logger.Println("FSM Close called, but Pebble DB was already nil.")
+	}
 	return nil
 }

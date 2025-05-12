@@ -11,7 +11,6 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	"github.com/hashicorp/raft-boltdb" // Using BoltDB for log and stable store
-	// "github.com/tecbot/gorocksdb" // Placeholder for RocksDB
 )
 
 const (
@@ -25,18 +24,18 @@ type Config struct {
 	NodeID          string        // Unique ID for this node in the Raft cluster.
 	RaftBindAddress string        // TCP address for Raft to bind to (e.g., "localhost:7000").
 	RaftDataDir     string        // Directory to store Raft log and snapshots.
-	RocksDBPath     string        // Path for RocksDB data.
+	RocksDBPath     string        // Path for PebbleDB data. (Renamed conceptually, field name kept for now)
 	Bootstrap       bool          // Whether to bootstrap a new cluster if no existing state.
 	JoinAddresses   []string      // Addresses of existing cluster members to join (optional).
 	ApplyTimeout    time.Duration // Timeout for Raft apply operations.
 	Logger          *log.Logger   // Logger instance.
 }
 
-// KVReplicator provides a replicated key-value store using RocksDB and Raft.
+// KVReplicator provides a replicated key-value store using PebbleDB and Raft.
 type KVReplicator struct {
 	config    Config
 	raftNode  *raft.Raft
-	fsm       *rocksDBFSM
+	fsm       *pebbleFSM // Changed from rocksDBFSM
 	logger    *log.Logger
 	transport raft.Transport
 }
@@ -57,30 +56,31 @@ func NewKVReplicator(cfg Config) (*KVReplicator, error) {
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("NodeID must be specified")
 	}
-	// RocksDBPath is not strictly required here if FSM handles default path, but good practice
-	// if cfg.RocksDBPath == "" {
-	// 	return nil, fmt.Errorf("RocksDBPath must be specified")
-	// }
+	if cfg.RocksDBPath == "" { // This is now for Pebble
+		return nil, fmt.Errorf("RocksDBPath (for Pebble) must be specified")
+	}
 
 	// Ensure Raft data directory exists
 	if err := os.MkdirAll(cfg.RaftDataDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create Raft data directory %s: %w", cfg.RaftDataDir, err)
 	}
+	// Pebble FSM will create its own directory based on RocksDBPath
 
 	kv := &KVReplicator{
 		config: cfg,
 		logger: cfg.Logger,
 	}
 
-	// Initialize the FSM (Finite State Machine)
-	// In a real scenario, you'd pass cfg.RocksDBPath to newRocksDBFSM
-	// and it would open/initialize RocksDB.
-	kv.fsm = newRocksDBFSM(cfg.Logger /*, cfg.RocksDBPath */)
+	// Initialize the FSM (Finite State Machine) for Pebble
+	fsm, err := newPebbleFSM(cfg.RocksDBPath, cfg.Logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Pebble FSM: %w", err)
+	}
+	kv.fsm = fsm
 
 	// Setup Raft configuration.
 	raftConfig := raft.DefaultConfig()
 	raftConfig.LocalID = raft.ServerID(cfg.NodeID)
-	// raftConfig.Logger = cfg.Logger // Use hclog adapter if necessary, but hashicorp/log is often compatible
 	raftConfig.Logger = hclog.New(&hclog.LoggerOptions{
 		Name:   fmt.Sprintf("raft-%s", cfg.NodeID),
 		Output: cfg.Logger.Writer(), // Standard logger's output
@@ -117,6 +117,10 @@ func NewKVReplicator(cfg Config) (*KVReplicator, error) {
 	// Instantiate the Raft system.
 	r, err := raft.NewRaft(raftConfig, kv.fsm, logStore, stableStore, snapshotStore, transport)
 	if err != nil {
+		// Close FSM if raft creation fails
+		if closeErr := kv.fsm.Close(); closeErr != nil {
+			kv.logger.Printf("ERROR: failed to close FSM after Raft creation error: %v", closeErr)
+		}
 		return nil, fmt.Errorf("failed to create Raft instance: %w", err)
 	}
 	kv.raftNode = r
@@ -125,104 +129,49 @@ func NewKVReplicator(cfg Config) (*KVReplicator, error) {
 }
 
 // Start initializes the Raft node. If config.Bootstrap is true and no existing state,
-// it bootstraps a new cluster. If config.JoinAddress is provided, it attempts to join
-// an existing cluster.
+// it bootstraps a new cluster.
 func (kv *KVReplicator) Start() error {
 	if kv.config.Bootstrap {
-		// Check if we need to bootstrap. This is typically done if the cluster
-		// has no existing state (e.g., no peers.json and no log entries).
-		// hasExistingState, err := raft.HasExistingState(logStore, stableStore, snapshotStore) // logStore, etc. not in scope
-		// For simplicity, we'll rely on the configuration passed to BootstrapCluster.
-		// A more robust check would inspect the stores.
-
 		configuration := raft.Configuration{
 			Servers: []raft.Server{
 				{
 					ID:      raft.ServerID(kv.config.NodeID),
-					Address: kv.transport.LocalAddr(), // Use the stored transport's address
+					Address: kv.transport.LocalAddr(),
 				},
 			},
 		}
 		bootstrapFuture := kv.raftNode.BootstrapCluster(configuration)
 		if err := bootstrapFuture.Error(); err != nil {
-			// Check if it's "already bootstrapped" or similar error, which might be fine.
-			// hashicorp/raft handles this by not re-bootstrapping if state exists.
 			kv.logger.Printf("INFO: BootstrapCluster returned: %v (this may be normal if already bootstrapped or joining)", err)
-			// If we intend to join, we shouldn't fatal here.
-			// Let's proceed, joining logic will take over if needed.
 		} else {
 			kv.logger.Printf("INFO: Cluster bootstrapped successfully with node %s", kv.config.NodeID)
 		}
 	}
 
-	// Attempt to join an existing cluster if JoinAddresses are provided.
-	// This should happen after potential bootstrap attempt for the first node,
-	// or if this node is explicitly told to join.
-	if len(kv.config.JoinAddresses) > 0 && !kv.config.Bootstrap { // Only join if not bootstrapping this node as the first one
+	// Handle joining logic (simplified as before, focused on logging intention)
+	if len(kv.config.JoinAddresses) > 0 && !kv.config.Bootstrap {
 		kv.logger.Printf("Attempting to join cluster via addresses: %v", kv.config.JoinAddresses)
-		// Note: A node usually doesn't add itself as a voter. This call might be part of a more
-		// complex join logic or might need to be initiated by an existing leader.
-		// For now, correcting the call to match AddVoter's signature and use the stored transport.
-		addVoterFuture := kv.raftNode.AddVoter(raft.ServerID(kv.config.NodeID), kv.transport.LocalAddr(), 0, 0)
-		if err := addVoterFuture.Error(); err != nil {
-			kv.logger.Printf("ERROR: AddVoter call for self failed (this is unusual for join): %v", err)
-			// This is tricky. Adding self as voter is usually done by a leader.
-			// Instead, we should use Join (which typically involves RPC to leader).
-		} else {
-			kv.logger.Printf("INFO: AddVoter call for self completed (this is unusual for join).")
-		}
-
-
-		// The proper way to join is by calling raft.Join on one of the existing nodes.
-		// This is typically an RPC call to an existing leader to add this node.
-		// For simplicity, the hashicorp/raft library expects this to be coordinated externally
-		// or by having the leader use AddVoter.
-		// If a node starts and is part of the configured peers but not the leader,
-		// it will attempt to discover the leader and join.
-		// If `JoinAddresses` are provided, it implies we want `raft.AddVoter` to be called on the leader for this node.
-		// This is usually done by an external mechanism or an API on the leader.
-		// For now, we assume that if this node is configured as part of the initial peer set
-		// (e.g. during bootstrap of multiple nodes) or if an AddVoter command is sent to the leader,
-		// it will join. The `JoinAddresses` can be used by a client utility to tell the leader to add this node.
-
-		// A simpler approach for a new node starting:
-		// If not bootstrapping and JoinAddresses are present, try to contact one of them
-		// and ask it to add this node as a voter. This requires an API on the server.
-		// For now, we assume the configuration is set up such that this node will eventually be added.
-		// Hashicorp's example often involves manually adding nodes via an HTTP API.
-
-		// A simplified automatic join attempt (less robust than manual AddVoter on leader):
-		// If trying to join, the node will attempt to contact existing servers.
-		// The `BootstrapCluster` on the first node sets up the initial config.
-		// Other nodes, if started with the same configuration of servers, will try to join.
-		// If JoinAddresses are provided, this node will try to get the leader to add it.
-		// This is more complex than can be fully implemented here without an external join mechanism.
-		// The `raft.Raft` object itself doesn't have a `JoinCluster(remoteAddrs)` method.
-		// It's usually `leader.AddVoter(thisNodeID, thisNodeAddr, ...)`.
-		// So, for now, we'll log that manual intervention or an external join mechanism might be needed
-		// if this node isn't part of the initial bootstrapped configuration.
+		// Actual joining mechanism typically involves leader adding this node.
+		// Raft library handles discovery if node is configured as a peer.
+		// For now, log the intent; AddVoter API can be used on leader.
 		kv.logger.Printf("INFO: If this node is not part of the initial cluster configuration, it must be added via AddVoter by the leader.")
-
 	} else if !kv.config.Bootstrap {
 		kv.logger.Printf("INFO: Starting node. Will attempt to discover existing cluster or wait to be added.")
 	}
 
-	kv.logger.Printf("KVReplicator started. Node ID: %s, Raft Address: %s", kv.config.NodeID, kv.config.RaftBindAddress)
+	kv.logger.Printf("KVReplicator started. Node ID: %s, Raft Address: %s, Pebble Path: %s", kv.config.NodeID, kv.config.RaftBindAddress, kv.config.RocksDBPath)
 	return nil
 }
 
 // Get retrieves a value for a given key.
-// This reads directly from the local FSM, providing eventual consistency.
-// For strongly consistent reads, a more complex mechanism (e.g., Raft read index or linearizable reads) would be needed.
+// Reads directly from the local FSM (PebbleDB).
 func (kv *KVReplicator) Get(key string) (string, error) {
-	// Check if we are the leader - optional, but can inform client about consistency
-	// if kv.raftNode.State() != raft.Leader {
-	//  kv.logger.Printf("WARN: Get operation on a non-leader node. Data might be stale.")
-	// }
-
-	value, ok := kv.fsm.Get(key)
-	if !ok {
-		return "", fmt.Errorf("key not found: %s", key) // Or return a specific error like ErrKeyNotFound
+	// pebbleFSM.Get now returns (string, error), where error can be "key not found"
+	value, err := kv.fsm.Get(key)
+	if err != nil {
+		// The FSM's Get method already formats the "key not found" error,
+		// so we can return it directly.
+		return "", err
 	}
 	return value, nil
 }
@@ -230,7 +179,8 @@ func (kv *KVReplicator) Get(key string) (string, error) {
 // Put sets a value for a given key. The operation is applied via Raft log.
 func (kv *KVReplicator) Put(key, value string) error {
 	if kv.raftNode.State() != raft.Leader {
-		return fmt.Errorf("cannot apply Put: not the leader. Current leader: %s", kv.raftNode.Leader())
+		leaderAddr := kv.raftNode.Leader()
+		return fmt.Errorf("cannot apply Put: not the leader. Current leader: %s", leaderAddr)
 	}
 
 	cmd := &Command{
@@ -248,7 +198,6 @@ func (kv *KVReplicator) Put(key, value string) error {
 		return fmt.Errorf("failed to apply Put command via Raft: %w", err)
 	}
 
-	// The response from Apply() in the FSM can also be an error.
 	response := applyFuture.Response()
 	if err, ok := response.(error); ok {
 		return fmt.Errorf("put command failed to apply on FSM: %w", err)
@@ -261,7 +210,8 @@ func (kv *KVReplicator) Put(key, value string) error {
 // Delete removes a key from the store. The operation is applied via Raft log.
 func (kv *KVReplicator) Delete(key string) error {
 	if kv.raftNode.State() != raft.Leader {
-		return fmt.Errorf("cannot apply Delete: not the leader. Current leader: %s", kv.raftNode.Leader())
+		leaderAddr := kv.raftNode.Leader()
+		return fmt.Errorf("cannot apply Delete: not the leader. Current leader: %s", leaderAddr)
 	}
 
 	cmd := &Command{
@@ -298,7 +248,7 @@ func (kv *KVReplicator) Leader() raft.ServerAddress {
 	return kv.raftNode.Leader()
 }
 
-// Shutdown gracefully shuts down the KVReplicator, including the Raft node.
+// Shutdown gracefully shuts down the KVReplicator, including the Raft node and FSM.
 func (kv *KVReplicator) Shutdown() error {
 	kv.logger.Println("Shutting down KVReplicator...")
 
@@ -311,11 +261,11 @@ func (kv *KVReplicator) Shutdown() error {
 	}
 
 	if kv.fsm != nil {
-		if err := kv.fsm.Close(); err != nil { // Assuming FSM has a Close method for RocksDB
-			kv.logger.Printf("ERROR: failed to close FSM: %v", err)
+		if err := kv.fsm.Close(); err != nil {
+			kv.logger.Printf("ERROR: failed to close FSM (Pebble DB): %v", err)
 			return err // Or collect errors and return aggregate
 		}
-		kv.logger.Println("FSM closed.")
+		kv.logger.Println("FSM (Pebble DB) closed.")
 	}
 	return nil
 }
@@ -334,7 +284,8 @@ func (kv *KVReplicator) Stats() map[string]string {
 // serverAddress: Address of the new node.
 func (kv *KVReplicator) AddVoter(serverID string, serverAddress string) error {
 	if !kv.IsLeader() {
-		return fmt.Errorf("node is not the leader, cannot add voter. Current leader: %s", kv.Leader())
+		leaderAddr := kv.Leader()
+		return fmt.Errorf("node is not the leader, cannot add voter. Current leader: %s", leaderAddr)
 	}
 
 	kv.logger.Printf("Attempting to add voter: ID=%s, Address=%s", serverID, serverAddress)
@@ -351,7 +302,6 @@ func (kv *KVReplicator) AddVoter(serverID string, serverAddress string) error {
 				kv.logger.Printf("Node %s with address %s already part of configuration.", serverID, serverAddress)
 				return nil // Already exists with same address
 			}
-			// If ID exists but address is different, it's more complex - might need RemoveServer first
 			return fmt.Errorf("node %s already exists with a different address: %s", serverID, srv.Address)
 		}
 	}
@@ -370,7 +320,8 @@ func (kv *KVReplicator) AddVoter(serverID string, serverAddress string) error {
 // serverID: ID of the node to remove.
 func (kv *KVReplicator) RemoveServer(serverID string) error {
 	if !kv.IsLeader() {
-		return fmt.Errorf("node is not the leader, cannot remove server. Current leader: %s", kv.Leader())
+		leaderAddr := kv.Leader()
+		return fmt.Errorf("node is not the leader, cannot remove server. Current leader: %s", leaderAddr)
 	}
 	if serverID == kv.config.NodeID {
 		return fmt.Errorf("cannot remove self from the cluster using this method; leader transfer might be needed")
