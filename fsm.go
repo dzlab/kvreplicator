@@ -135,7 +135,7 @@ func (fsm *rocksDBFSM) Restore(rc io.ReadCloser) error {
 	// Here, we'll just clear and repopulate the map based on a simple format read from rc.
 	// We expect a series of Command objects serialized by rocksDBFSMSnapshot.Persist.
 
-	newData := make(map[string]string)
+	// newData := make(map[string]string)
 	// This is where you would read the snapshot data from 'rc' and deserialize it.
 	// For RocksDB, this might be a complex process involving checkpoint files or a custom format.
 	// For our simplified in-memory example, let's assume the snapshot is just a JSON stream of commands.

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	"github.com/hashicorp/raft-boltdb" // Using BoltDB for log and stable store
 	// "github.com/tecbot/gorocksdb" // Placeholder for RocksDB
@@ -33,10 +34,11 @@ type Config struct {
 
 // KVReplicator provides a replicated key-value store using RocksDB and Raft.
 type KVReplicator struct {
-	config   Config
-	raftNode *raft.Raft
-	fsm      *rocksDBFSM
-	logger   *log.Logger
+	config    Config
+	raftNode  *raft.Raft
+	fsm       *rocksDBFSM
+	logger    *log.Logger
+	transport raft.Transport
 }
 
 // NewKVReplicator creates and initializes a new KVReplicator instance.
@@ -78,7 +80,12 @@ func NewKVReplicator(cfg Config) (*KVReplicator, error) {
 	// Setup Raft configuration.
 	raftConfig := raft.DefaultConfig()
 	raftConfig.LocalID = raft.ServerID(cfg.NodeID)
-	raftConfig.Logger = cfg.Logger // Use hclog adapter if necessary, but hashicorp/log is often compatible
+	// raftConfig.Logger = cfg.Logger // Use hclog adapter if necessary, but hashicorp/log is often compatible
+	raftConfig.Logger = hclog.New(&hclog.LoggerOptions{
+		Name:   fmt.Sprintf("raft-%s", cfg.NodeID),
+		Output: cfg.Logger.Writer(), // Standard logger's output
+		Level:  hclog.Info,          // Or hclog.Debug for more verbosity
+	})
 	raftConfig.SnapshotInterval = 20 * time.Second
 	raftConfig.SnapshotThreshold = 50 // Number of logs before a snapshot
 
@@ -87,13 +94,14 @@ func NewKVReplicator(cfg Config) (*KVReplicator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve Raft bind address %s: %w", cfg.RaftBindAddress, err)
 	}
-	transport, err := raft.NewTCPTransport(cfg.RaftBindAddress, addr, 3, 10*time.Second, cfg.Logger)
+	transport, err := raft.NewTCPTransport(cfg.RaftBindAddress, addr, 3, 10*time.Second, cfg.Logger.Writer())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Raft TCP transport: %w", err)
 	}
+	kv.transport = transport // Store the transport
 
 	// Create snapshot store. This allows Raft to compact its log.
-	snapshotStore, err := raft.NewFileSnapshotStore(cfg.RaftDataDir, defaultRetainSnapshotCount, cfg.Logger)
+	snapshotStore, err := raft.NewFileSnapshotStore(cfg.RaftDataDir, defaultRetainSnapshotCount, cfg.Logger.Writer())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Raft file snapshot store in %s: %w", cfg.RaftDataDir, err)
 	}
@@ -131,7 +139,7 @@ func (kv *KVReplicator) Start() error {
 			Servers: []raft.Server{
 				{
 					ID:      raft.ServerID(kv.config.NodeID),
-					Address: kv.raftNode.Transport().LocalAddr(), // Use the transport's address
+					Address: kv.transport.LocalAddr(), // Use the stored transport's address
 				},
 			},
 		}
@@ -152,14 +160,18 @@ func (kv *KVReplicator) Start() error {
 	// or if this node is explicitly told to join.
 	if len(kv.config.JoinAddresses) > 0 && !kv.config.Bootstrap { // Only join if not bootstrapping this node as the first one
 		kv.logger.Printf("Attempting to join cluster via addresses: %v", kv.config.JoinAddresses)
-		joinResp, err := kv.raftNode.AddVoter(raft.ServerID(kv.config.NodeID), kv.raftNode.Transport().LocalAddr(), 0, 0)
-		if err != nil {
-			kv.logger.Printf("ERROR: could not add self as voter to prepare for join: %v", err)
+		// Note: A node usually doesn't add itself as a voter. This call might be part of a more
+		// complex join logic or might need to be initiated by an existing leader.
+		// For now, correcting the call to match AddVoter's signature and use the stored transport.
+		addVoterFuture := kv.raftNode.AddVoter(raft.ServerID(kv.config.NodeID), kv.transport.LocalAddr(), 0, 0)
+		if err := addVoterFuture.Error(); err != nil {
+			kv.logger.Printf("ERROR: AddVoter call for self failed (this is unusual for join): %v", err)
 			// This is tricky. Adding self as voter is usually done by a leader.
-			// Instead, we should use Join.
-		} else if err := joinResp.Error(); err != nil {
-			kv.logger.Printf("ERROR: could not add self as voter (future error): %v", err)
+			// Instead, we should use Join (which typically involves RPC to leader).
+		} else {
+			kv.logger.Printf("INFO: AddVoter call for self completed (this is unusual for join).")
 		}
+
 
 		// The proper way to join is by calling raft.Join on one of the existing nodes.
 		// This is typically an RPC call to an existing leader to add this node.
