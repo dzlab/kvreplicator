@@ -1,0 +1,43 @@
+name: KVReplicator CI
+
+on:
+  push:
+    paths:
+      - "vibecoding/kvreplicator/**"
+      - ".github/workflows/kvreplicator-ci.yml" # Also run if workflow file itself changes
+  pull_request:
+    paths:
+      - "vibecoding/kvreplicator/**"
+      - ".github/workflows/kvreplicator-ci.yml"
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./vibecoding/kvreplicator
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Checkout the code into the GITHUB_WORKSPACE/vibecoding directory
+          # to match the local structure and simplify paths.
+          path: vibecoding
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: "vibecoding/kvreplicator/go.mod" # Path to your go.mod file
+
+      - name: Install RocksDB system library
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librocksdb-dev build-essential
+      - name: Install Go dependencies
+        run: go mod download
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test
+        run: go test -v ./...
