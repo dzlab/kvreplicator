@@ -46,7 +46,7 @@ func setupKVReplicator(t *testing.T, nodeID string, bootstrap bool, joinAddresse
 	}
 
 	cleanup := func() {
-		if kv.raftNode != nil {
+		if kv.raftManager.raftNode != nil {
 			kv.Shutdown() // Ensure Raft node is shut down
 		}
 		os.RemoveAll(raftDataDir)
@@ -66,7 +66,7 @@ func waitForLeader(t *testing.T, kv *KVReplicator, timeout time.Duration) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("Node %s did not become leader within %v. Current state: %s, Leader: %s", kv.config.NodeID, timeout, kv.raftNode.State().String(), kv.Leader())
+	t.Fatalf("Node %s did not become leader within %v. Current state: %s, Leader: %s", kv.config.NodeID, timeout, kv.raftManager.raftNode.State().String(), kv.Leader())
 }
 
 func TestNewKVReplicator(t *testing.T) {
@@ -262,7 +262,7 @@ func TestKVReplicator_Membership_SingleNode(t *testing.T) {
 
 	// Check configuration (optional, needs a moment for config to propagate)
 	time.Sleep(200 * time.Millisecond) // Give Raft time to commit the config change
-	configFuture := kv.raftNode.GetConfiguration()
+	configFuture := kv.raftManager.raftNode.GetConfiguration()
 	if err := configFuture.Error(); err != nil {
 		t.Fatalf("Failed to get configuration: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestKVReplicator_Membership_SingleNode(t *testing.T) {
 
 	// Check configuration again
 	time.Sleep(200 * time.Millisecond)
-	configFuture = kv.raftNode.GetConfiguration()
+	configFuture = kv.raftManager.raftNode.GetConfiguration()
 	if err := configFuture.Error(); err != nil {
 		t.Fatalf("Failed to get configuration after remove: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestKVReplicator_JoinLogic_Simplified(t *testing.T) {
 	if kv.IsLeader() {
 		t.Errorf("Joining node %s unexpectedly became leader", nodeID)
 	}
-	if kv.raftNode.State() == raft.Shutdown {
+	if kv.raftManager.raftNode.State() == raft.Shutdown {
 		t.Errorf("Joining node %s is shutdown, expected it to be follower or candidate", nodeID)
 	}
 
