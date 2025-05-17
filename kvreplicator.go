@@ -6,30 +6,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb" // Using BoltDB for log and stable store
 )
-
-const (
-	defaultApplyTimeout        = 10 * time.Second
-	defaultRetainSnapshotCount = 2
-	defaultRaftLogCacheSize    = 512
-)
-
-// Config holds the configuration for the KVReplicator.
-type Config struct {
-	NodeID          string        // Unique ID for this node in the Raft cluster.
-	RaftBindAddress string        // TCP address for Raft to bind to (e.g., "localhost:7000").
-	RaftDataDir     string        // Directory to store Raft log and snapshots.
-	DBPath          string        // Path for PebbleDB data.
-	Bootstrap       bool          // Whether to bootstrap a new cluster if no existing state.
-	JoinAddresses   []string      // Addresses of existing cluster members to join (optional).
-	ApplyTimeout    time.Duration // Timeout for Raft apply operations.
-	Logger          *log.Logger   // Logger instance.
-}
 
 // KVReplicator provides a replicated key-value store using PebbleDB and Raft.
 type KVReplicator struct {
@@ -50,14 +31,24 @@ func NewKVReplicator(cfg Config) (*KVReplicator, error) {
 	if cfg.ApplyTimeout == 0 {
 		cfg.ApplyTimeout = defaultApplyTimeout
 	}
-	if cfg.RaftDataDir == "" {
-		return nil, fmt.Errorf("RaftDataDir must be specified")
+	if cfg.SnapshotInterval == 0 {
+		cfg.SnapshotInterval = defaultSnapshotInterval
 	}
-	if cfg.NodeID == "" {
-		return nil, fmt.Errorf("NodeID must be specified")
+	if cfg.SnapshotThreshold == 0 {
+		cfg.SnapshotThreshold = defaultSnapshotThreshold
 	}
-	if cfg.DBPath == "" {
-		return nil, fmt.Errorf("DBPath must be specified")
+	if cfg.RetainSnapshotCount == 0 {
+		cfg.RetainSnapshotCount = defaultRetainSnapshotCount
+	}
+	if cfg.TCPMaxPool == 0 {
+		cfg.TCPMaxPool = defaultTCPMaxPool
+	}
+	if cfg.TCPTimeout == 0 {
+		cfg.TCPTimeout = defaultTCPTimeout
+	}
+
+	if err := ValidateConfig(&cfg); err != nil {
+		return nil, err
 	}
 
 	// Ensure Raft data directory exists
@@ -86,22 +77,35 @@ func NewKVReplicator(cfg Config) (*KVReplicator, error) {
 		Output: cfg.Logger.Writer(), // Standard logger's output
 		Level:  hclog.Info,          // Or hclog.Debug for more verbosity
 	})
-	raftConfig.SnapshotInterval = 20 * time.Second
-	raftConfig.SnapshotThreshold = 50 // Number of logs before a snapshot
+	// Apply Raft timing configuration
+	raftConfig.SnapshotInterval = cfg.SnapshotInterval
+	raftConfig.SnapshotThreshold = cfg.SnapshotThreshold
+	if cfg.HeartbeatTimeout > 0 {
+		raftConfig.HeartbeatTimeout = cfg.HeartbeatTimeout
+	}
+	if cfg.ElectionTimeout > 0 {
+		raftConfig.ElectionTimeout = cfg.ElectionTimeout
+	}
+	if cfg.LeaderLeaseTimeout > 0 {
+		raftConfig.LeaderLeaseTimeout = cfg.LeaderLeaseTimeout
+	}
+	if cfg.CommitTimeout > 0 {
+		raftConfig.CommitTimeout = cfg.CommitTimeout
+	}
 
 	// Setup Raft communication (transport).
 	addr, err := net.ResolveTCPAddr("tcp", cfg.RaftBindAddress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve Raft bind address %s: %w", cfg.RaftBindAddress, err)
 	}
-	transport, err := raft.NewTCPTransport(cfg.RaftBindAddress, addr, 3, 10*time.Second, cfg.Logger.Writer())
+	transport, err := raft.NewTCPTransport(cfg.RaftBindAddress, addr, cfg.TCPMaxPool, cfg.TCPTimeout, cfg.Logger.Writer())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Raft TCP transport: %w", err)
 	}
 	kv.transport = transport // Store the transport
 
 	// Create snapshot store. This allows Raft to compact its log.
-	snapshotStore, err := raft.NewFileSnapshotStore(cfg.RaftDataDir, defaultRetainSnapshotCount, cfg.Logger.Writer())
+	snapshotStore, err := raft.NewFileSnapshotStore(cfg.RaftDataDir, cfg.RetainSnapshotCount, cfg.Logger.Writer())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Raft file snapshot store in %s: %w", cfg.RaftDataDir, err)
 	}

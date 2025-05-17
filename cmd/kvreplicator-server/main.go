@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"vibecoding/kvreplicator" // Assuming kvreplicator is in the gopath or module path
 )
@@ -65,17 +64,8 @@ func main() {
 	if joinAddrStr != "" {
 		joinAddresses = strings.Split(joinAddrStr, ",")
 	}
-
-	config := kvreplicator.Config{
-		NodeID:          nodeID,
-		RaftBindAddress: raftBindAddr,
-		RaftDataDir:     raftDataDir,
-		DBPath:          dbDataDir, // Pass this to your FSM for DB
-		Bootstrap:       bootstrapCluster,
-		JoinAddresses:   joinAddresses, // Used conceptually for now
-		Logger:          logger,
-		ApplyTimeout:    10 * time.Second,
-	}
+	config := kvreplicator.DefaultConfig(nodeID, raftBindAddr, raftDataDir, dbDataDir)
+	config.WithClusterConfig(bootstrapCluster, joinAddresses)
 
 	kvStore, err := kvreplicator.NewKVReplicator(config)
 	if err != nil {
