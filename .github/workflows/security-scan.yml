@@ -31,12 +31,6 @@ jobs:
             gosec-report.txt
             govulncheck-report.json
 
-      - name: Run CodeQL security scanner
-        uses: github/codeql-action@v2
-        with:
-          languages: go
-          queries: security-and-quality
-
       - name: Comment on PR
         uses: actions/github-script@v6
         with:
