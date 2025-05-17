@@ -38,37 +38,6 @@ func (ks *kvStore) Get(key string) (string, error) {
 	return ks.fsm.Get(key)
 }
 
-// // Apply applies a Raft log entry to the FSM. This method is called by Raft.
-// func (ks *kvStore) Apply(l *raft.Log) interface{} {
-// 	var cmd Command
-// 	if err := cmd.Deserialize(l.Data); err != nil {
-// 		ks.logger.Printf("ERROR: failed to deserialize command: %v", err)
-// 		return err // Return error to Raft apply future
-// 	}
-
-// 	switch cmd.Op {
-// 	case OpPut:
-// 		if err := ks.fsm.Put(cmd.Key, cmd.Value); err != nil {
-// 			ks.logger.Printf("ERROR: failed to apply Put command for key %s: %v", cmd.Key, err)
-// 			return err
-// 		}
-// 		ks.logger.Printf("Applied Put: Key=%s", cmd.Key)
-// 		return nil // Success
-
-// 	case OpDelete:
-// 		if err := ks.fsm.Delete(cmd.Key); err != nil {
-// 			ks.logger.Printf("ERROR: failed to apply Delete command for key %s: %v", cmd.Key, err)
-// 			return err
-// 		}
-// 		ks.logger.Printf("Applied Delete: Key=%s", cmd.Key)
-// 		return nil // Success
-
-// 	default:
-// 		ks.logger.Printf("ERROR: unknown command operation: %s", cmd.Op)
-// 		return fmt.Errorf("unknown command operation: %s", cmd.Op)
-// 	}
-// }
-
 // Snapshot returns a raft.FSMSnapshot suitable for saving state to disk.
 func (ks *kvStore) Snapshot() (raft.FSMSnapshot, error) {
 	ks.logger.Println("Creating FSM snapshot...")
