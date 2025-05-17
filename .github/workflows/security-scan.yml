@@ -13,16 +13,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Run GoSec security scanner
-        uses: securego/gosec@latest
-        with:
-          args: ./...
+      - name: Install GoSec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
 
-      - name: Upload security scan results
-        uses: actions/upload-artifact@v3
-        with:
-          name: security-scan-results
-          path: results.json
+      - name: Run GoSec security scanner
+        run: |
+          $GOPATH/bin/gosec ./...
 
       - name: Run govulncheck vulnerability scanner
         run: |
