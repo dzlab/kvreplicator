@@ -103,26 +103,9 @@ func (kv *KVReplicator) Put(key, value string) error {
 		Key:   key,
 		Value: value,
 	}
-	data, err := cmd.Serialize()
-	if err != nil {
-		return fmt.Errorf("failed to serialize Put command: %w", err)
-	}
 
 	// Apply the command through the Raft manager
-	applyFuture := kv.raftManager.ApplyCommand(data, kv.config.ApplyTimeout)
-	if err := applyFuture.Error(); err != nil {
-		return fmt.Errorf("failed to apply Put command via Raft: %w", err)
-	}
-
-	// Check the response from the FSM application
-	response := applyFuture.Response()
-	if err, ok := response.(error); ok {
-		return fmt.Errorf("put command failed to apply on FSM: %w", err)
-	}
-
-	// Log success after confirming FSM application
-	kv.logger.Printf("Put successful: Key=%s", key)
-	return nil
+	return kv.raftManager.ApplyCommand(cmd, kv.config.ApplyTimeout)
 }
 
 // Delete removes a key from the store. The operation is applied via Raft log.
@@ -137,26 +120,9 @@ func (kv *KVReplicator) Delete(key string) error {
 		Op:  OpDelete,
 		Key: key,
 	}
-	data, err := cmd.Serialize()
-	if err != nil {
-		return fmt.Errorf("failed to serialize %s command: %w", cmd.Op, err)
-	}
 
 	// Apply the command through the Raft manager
-	applyFuture := kv.raftManager.ApplyCommand(data, kv.config.ApplyTimeout)
-	if err := applyFuture.Error(); err != nil {
-		return fmt.Errorf("failed to apply %s command via Raft: %w", cmd.Op, err)
-	}
-
-	// Check the response from the FSM application
-	response := applyFuture.Response()
-	if err, ok := response.(error); ok {
-		return fmt.Errorf("%s command failed to apply on FSM: %w", cmd.Op, err)
-	}
-
-	// Log success after confirming FSM application
-	kv.logger.Printf("%s successful: Key=%s", cmd.Op, key)
-	return nil
+	return kv.raftManager.ApplyCommand(cmd, kv.config.ApplyTimeout)
 }
 
 // IsLeader checks if the current node is the Raft leader by consulting the raftManager.
