@@ -3,22 +3,18 @@ package kvreplicator
 import (
 	"fmt"
 	"log"
-	"net"
 	"os"
-	"path/filepath"
 
-	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
-	raftboltdb "github.com/hashicorp/raft-boltdb" // Using BoltDB for log and stable store
+	// Using BoltDB for log and stable store
 )
 
 // KVReplicator provides a replicated key-value store using PebbleDB and Raft.
 type KVReplicator struct {
-	config    Config
-	raftNode  *raft.Raft
-	fsm       *pebbleFSM // Changed from rocksDBFSM
-	logger    *log.Logger
-	transport raft.Transport
+	config      Config
+	raftManager *raftManager
+	kvStore     *kvStore
+	logger      *log.Logger
 }
 
 // NewKVReplicator creates and initializes a new KVReplicator instance.
@@ -51,139 +47,54 @@ func NewKVReplicator(cfg Config) (*KVReplicator, error) {
 		return nil, err
 	}
 
-	// Ensure Raft data directory exists
-	if err := os.MkdirAll(cfg.RaftDataDir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create Raft data directory %s: %w", cfg.RaftDataDir, err)
-	}
-	// Pebble FSM will create its own directory based on DBPath
-
 	kv := &KVReplicator{
 		config: cfg,
 		logger: cfg.Logger,
 	}
 
-	// Initialize the FSM (Finite State Machine) for Pebble
-	fsm, err := newPebbleFSM(cfg.DBPath, cfg.Logger)
+	// Initialize the KV Store (which wraps the Pebble FSM)
+	kvStore, err := newKVStore(cfg.DBPath, cfg.Logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Pebble FSM: %w", err)
+		return nil, fmt.Errorf("failed to create KV Store: %w", err)
 	}
-	kv.fsm = fsm
+	kv.kvStore = kvStore
 
-	// Setup Raft configuration.
-	raftConfig := raft.DefaultConfig()
-	raftConfig.LocalID = raft.ServerID(cfg.NodeID)
-	raftConfig.Logger = hclog.New(&hclog.LoggerOptions{
-		Name:   fmt.Sprintf("raft-%s", cfg.NodeID),
-		Output: cfg.Logger.Writer(), // Standard logger's output
-		Level:  hclog.Info,          // Or hclog.Debug for more verbosity
-	})
-	// Apply Raft timing configuration
-	raftConfig.SnapshotInterval = cfg.SnapshotInterval
-	raftConfig.SnapshotThreshold = cfg.SnapshotThreshold
-	if cfg.HeartbeatTimeout > 0 {
-		raftConfig.HeartbeatTimeout = cfg.HeartbeatTimeout
-	}
-	if cfg.ElectionTimeout > 0 {
-		raftConfig.ElectionTimeout = cfg.ElectionTimeout
-	}
-	if cfg.LeaderLeaseTimeout > 0 {
-		raftConfig.LeaderLeaseTimeout = cfg.LeaderLeaseTimeout
-	}
-	if cfg.CommitTimeout > 0 {
-		raftConfig.CommitTimeout = cfg.CommitTimeout
-	}
-
-	// Setup Raft communication (transport).
-	addr, err := net.ResolveTCPAddr("tcp", cfg.RaftBindAddress)
+	// Initialize the Raft Manager
+	// The raftManager needs the FSM instance to apply logs.
+	raftManager, err := newRaftManager(cfg, kv.kvStore.fsm, cfg.Logger) // Pass kvStore as raft.FSM
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve Raft bind address %s: %w", cfg.RaftBindAddress, err)
-	}
-	transport, err := raft.NewTCPTransport(cfg.RaftBindAddress, addr, cfg.TCPMaxPool, cfg.TCPTimeout, cfg.Logger.Writer())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Raft TCP transport: %w", err)
-	}
-	kv.transport = transport // Store the transport
-
-	// Create snapshot store. This allows Raft to compact its log.
-	snapshotStore, err := raft.NewFileSnapshotStore(cfg.RaftDataDir, cfg.RetainSnapshotCount, cfg.Logger.Writer())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Raft file snapshot store in %s: %w", cfg.RaftDataDir, err)
-	}
-
-	// Create log store and stable store. BoltDB is a good default.
-	boltDBPath := filepath.Join(cfg.RaftDataDir, "raft.db")
-	logStore, err := raftboltdb.NewBoltStore(boltDBPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create BoltDB store at %s: %w", boltDBPath, err)
-	}
-	stableStore := logStore // BoltStore implements both StableStore and LogStore
-
-	// Instantiate the Raft system.
-	r, err := raft.NewRaft(raftConfig, kv.fsm, logStore, stableStore, snapshotStore, transport)
-	if err != nil {
-		// Close FSM if raft creation fails
-		if closeErr := kv.fsm.Close(); closeErr != nil {
-			kv.logger.Printf("ERROR: failed to close FSM after Raft creation error: %v", closeErr)
+		// Close KV Store if raft manager creation fails
+		if closeErr := kv.kvStore.Close(); closeErr != nil {
+			kv.logger.Printf("ERROR: failed to close KV Store after Raft manager creation error: %v", closeErr)
 		}
-		return nil, fmt.Errorf("failed to create Raft instance: %w", err)
+		return nil, fmt.Errorf("failed to create Raft manager: %w", err)
 	}
-	kv.raftNode = r
+	kv.raftManager = raftManager
 
 	return kv, nil
 }
 
-// Start initializes the Raft node. If config.Bootstrap is true and no existing state,
-// it bootstraps a new cluster.
+// Start initializes the Raft node via the raftManager.
+// If config.Bootstrap is true and no existing state, it bootstraps a new cluster.
 func (kv *KVReplicator) Start() error {
-	if kv.config.Bootstrap {
-		configuration := raft.Configuration{
-			Servers: []raft.Server{
-				{
-					ID:      raft.ServerID(kv.config.NodeID),
-					Address: kv.transport.LocalAddr(),
-				},
-			},
-		}
-		bootstrapFuture := kv.raftNode.BootstrapCluster(configuration)
-		if err := bootstrapFuture.Error(); err != nil {
-			kv.logger.Printf("INFO: BootstrapCluster returned: %v (this may be normal if already bootstrapped or joining)", err)
-		} else {
-			kv.logger.Printf("INFO: Cluster bootstrapped successfully with node %s", kv.config.NodeID)
-		}
-	}
-
-	// Handle joining logic (simplified as before, focused on logging intention)
-	if len(kv.config.JoinAddresses) > 0 && !kv.config.Bootstrap {
-		kv.logger.Printf("Attempting to join cluster via addresses: %v", kv.config.JoinAddresses)
-		// Actual joining mechanism typically involves leader adding this node.
-		// Raft library handles discovery if node is configured as a peer.
-		// For now, log the intent; AddVoter API can be used on leader.
-		kv.logger.Printf("INFO: If this node is not part of the initial cluster configuration, it must be added via AddVoter by the leader.")
-	} else if !kv.config.Bootstrap {
-		kv.logger.Printf("INFO: Starting node. Will attempt to discover existing cluster or wait to be added.")
-	}
-
-	kv.logger.Printf("KVReplicator started. Node ID: %s, Raft Address: %s, Pebble Path: %s", kv.config.NodeID, kv.config.RaftBindAddress, kv.config.DBPath)
-	return nil
+	// The raftManager handles the bootstrap/join logic within its Start method.
+	return kv.raftManager.Start()
+	// The logger message about KVReplicator starting can be moved to main or called after this returns.
+	// For now, leaving it out as raftManager Start logs its own start.
 }
 
 // Get retrieves a value for a given key.
-// Reads directly from the local FSM (PebbleDB).
+// Reads directly from the local KV store (PebbleDB).
+// This read does not go through Raft.
 func (kv *KVReplicator) Get(key string) (string, error) {
-	// pebbleFSM.Get now returns (string, error), where error can be "key not found"
-	value, err := kv.fsm.Get(key)
-	if err != nil {
-		// The FSM's Get method already formats the "key not found" error,
-		// so we can return it directly.
-		return "", err
-	}
-	return value, nil
+	return kv.kvStore.Get(key)
 }
 
 // Put sets a value for a given key. The operation is applied via Raft log.
+// // This method must be called on the leader node.
 func (kv *KVReplicator) Put(key, value string) error {
-	if kv.raftNode.State() != raft.Leader {
-		leaderAddr := kv.raftNode.Leader()
+	if !kv.raftManager.IsLeader() {
+		leaderAddr := kv.raftManager.Leader()
 		return fmt.Errorf("cannot apply Put: not the leader. Current leader: %s", leaderAddr)
 	}
 
@@ -197,24 +108,28 @@ func (kv *KVReplicator) Put(key, value string) error {
 		return fmt.Errorf("failed to serialize Put command: %w", err)
 	}
 
-	applyFuture := kv.raftNode.Apply(data, kv.config.ApplyTimeout)
+	// Apply the command through the Raft manager
+	applyFuture := kv.raftManager.ApplyCommand(data, kv.config.ApplyTimeout)
 	if err := applyFuture.Error(); err != nil {
 		return fmt.Errorf("failed to apply Put command via Raft: %w", err)
 	}
 
+	// Check the response from the FSM application
 	response := applyFuture.Response()
 	if err, ok := response.(error); ok {
 		return fmt.Errorf("put command failed to apply on FSM: %w", err)
 	}
 
+	// Log success after confirming FSM application
 	kv.logger.Printf("Put successful: Key=%s", key)
 	return nil
 }
 
 // Delete removes a key from the store. The operation is applied via Raft log.
+// // This method must be called on the leader node.
 func (kv *KVReplicator) Delete(key string) error {
-	if kv.raftNode.State() != raft.Leader {
-		leaderAddr := kv.raftNode.Leader()
+	if !kv.raftManager.IsLeader() {
+		leaderAddr := kv.raftManager.Leader()
 		return fmt.Errorf("cannot apply Delete: not the leader. Current leader: %s", leaderAddr)
 	}
 
@@ -227,59 +142,83 @@ func (kv *KVReplicator) Delete(key string) error {
 		return fmt.Errorf("failed to serialize %s command: %w", cmd.Op, err)
 	}
 
-	applyFuture := kv.raftNode.Apply(data, kv.config.ApplyTimeout)
+	// Apply the command through the Raft manager
+	applyFuture := kv.raftManager.ApplyCommand(data, kv.config.ApplyTimeout)
 	if err := applyFuture.Error(); err != nil {
 		return fmt.Errorf("failed to apply %s command via Raft: %w", cmd.Op, err)
 	}
 
+	// Check the response from the FSM application
 	response := applyFuture.Response()
 	if err, ok := response.(error); ok {
 		return fmt.Errorf("%s command failed to apply on FSM: %w", cmd.Op, err)
 	}
 
+	// Log success after confirming FSM application
 	kv.logger.Printf("%s successful: Key=%s", cmd.Op, key)
 	return nil
 }
 
-// IsLeader checks if the current node is the Raft leader.
+// IsLeader checks if the current node is the Raft leader by consulting the raftManager.
 func (kv *KVReplicator) IsLeader() bool {
-	return kv.raftNode.State() == raft.Leader
+	if kv.raftManager == nil {
+		return false // Not initialized
+	}
+	return kv.raftManager.IsLeader()
 }
 
-// Leader returns the Raft address of the current leader.
+// Leader returns the Raft address of the current leader by consulting the raftManager.
 // Returns empty string if there is no current leader.
 func (kv *KVReplicator) Leader() raft.ServerAddress {
-	return kv.raftNode.Leader()
+	if kv.raftManager == nil {
+		return "" // Not initialized
+	}
+	return kv.raftManager.Leader()
 }
 
-// Shutdown gracefully shuts down the KVReplicator, including the Raft node and FSM.
+// Shutdown gracefully shuts down the KVReplicator, including the Raft manager and KV store.
 func (kv *KVReplicator) Shutdown() error {
 	kv.logger.Println("Shutting down KVReplicator...")
+	var raftErr, kvErr error
 
-	shutdownFuture := kv.raftNode.Shutdown()
-	if err := shutdownFuture.Error(); err != nil {
-		kv.logger.Printf("ERROR: failed to shut down Raft node: %v", err)
-		// Continue to close FSM even if Raft shutdown has issues
-	} else {
-		kv.logger.Println("Raft node shut down.")
-	}
-
-	if kv.fsm != nil {
-		if err := kv.fsm.Close(); err != nil {
-			kv.logger.Printf("ERROR: failed to close FSM (Pebble DB): %v", err)
-			return err // Or collect errors and return aggregate
+	// Shutdown Raft manager first
+	if kv.raftManager != nil {
+		raftErr = kv.raftManager.Shutdown()
+		if raftErr != nil {
+			kv.logger.Printf("ERROR: failed to shut down Raft manager: %v", raftErr)
 		}
-		kv.logger.Println("FSM (Pebble DB) closed.")
+	} else {
+		kv.logger.Println("Raft manager not initialized.")
 	}
+
+	// Close KV store
+	if kv.kvStore != nil {
+		kvErr = kv.kvStore.Close()
+		if kvErr != nil {
+			kv.logger.Printf("ERROR: failed to close KV Store: %v", kvErr)
+		}
+	} else {
+		kv.logger.Println("KV Store not initialized.")
+	}
+
+	// Return the first error encountered, if any
+	if raftErr != nil {
+		return fmt.Errorf("KVReplicator shutdown encountered errors: Raft manager: %w", raftErr)
+	}
+	if kvErr != nil {
+		return fmt.Errorf("KVReplicator shutdown encountered errors: KV Store: %w", kvErr)
+	}
+
+	kv.logger.Println("KVReplicator shut down successfully.")
 	return nil
 }
 
-// Stats returns basic stats from the Raft node.
+// Stats returns basic stats from the Raft node by consulting the raftManager.
 func (kv *KVReplicator) Stats() map[string]string {
-	if kv.raftNode == nil {
-		return map[string]string{"error": "Raft node not initialized"}
+	if kv.raftManager == nil {
+		return map[string]string{"error": "Raft manager not initialized"}
 	}
-	return kv.raftNode.Stats()
+	return kv.raftManager.Stats()
 }
 
 // AddVoter attempts to add a new node to the cluster as a voter.
@@ -292,31 +231,9 @@ func (kv *KVReplicator) AddVoter(serverID string, serverAddress string) error {
 		return fmt.Errorf("node is not the leader, cannot add voter. Current leader: %s", leaderAddr)
 	}
 
-	kv.logger.Printf("Attempting to add voter: ID=%s, Address=%s", serverID, serverAddress)
-
-	configFuture := kv.raftNode.GetConfiguration()
-	if err := configFuture.Error(); err != nil {
-		return fmt.Errorf("failed to get current raft configuration: %w", err)
-	}
-	currentConfig := configFuture.Configuration()
-
-	for _, srv := range currentConfig.Servers {
-		if srv.ID == raft.ServerID(serverID) {
-			if srv.Address == raft.ServerAddress(serverAddress) {
-				kv.logger.Printf("Node %s with address %s already part of configuration.", serverID, serverAddress)
-				return nil // Already exists with same address
-			}
-			return fmt.Errorf("node %s already exists with a different address: %s", serverID, srv.Address)
-		}
-	}
-
-	addFuture := kv.raftNode.AddVoter(raft.ServerID(serverID), raft.ServerAddress(serverAddress), 0, 0)
-	if err := addFuture.Error(); err != nil {
-		return fmt.Errorf("failed to add voter %s at %s: %w", serverID, serverAddress, err)
-	}
-
-	kv.logger.Printf("Successfully added voter: ID=%s, Address=%s", serverID, serverAddress)
-	return nil
+	// Delegate the actual Raft operation to the raftManager
+	// The raftManager's AddVoter method handles checking if the server already exists internally.
+	return kv.raftManager.AddVoter(serverID, serverAddress)
 }
 
 // RemoveServer attempts to remove a node from the cluster.
@@ -331,13 +248,6 @@ func (kv *KVReplicator) RemoveServer(serverID string) error {
 		return fmt.Errorf("cannot remove self from the cluster using this method; leader transfer might be needed")
 	}
 
-	kv.logger.Printf("Attempting to remove server: ID=%s", serverID)
-
-	removeFuture := kv.raftNode.RemoveServer(raft.ServerID(serverID), 0, 0)
-	if err := removeFuture.Error(); err != nil {
-		return fmt.Errorf("failed to remove server %s: %w", serverID, err)
-	}
-
-	kv.logger.Printf("Successfully removed server: ID=%s", serverID)
-	return nil
+	// Delegate the actual Raft operation to the raftManager
+	return kv.raftManager.RemoveServer(serverID)
 }
