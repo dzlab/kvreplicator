@@ -141,8 +141,24 @@ func (rm *raftManager) Shutdown() error {
 }
 
 // ApplyCommand applies a command to the FSM via Raft.
+func (rm *raftManager) ApplyCommand(cmd *Command, timeout time.Duration) error {
+	data, err1 := cmd.Serialize()
+	if err1 != nil {
+		return fmt.Errorf("failed to serialize %s command: %w", cmd.Op, err1)
+	}
+	applyFuture := rm.Apply(data, timeout)
+	// Check the response from the FSM application
+	response := applyFuture.Response()
+	if err2, ok := response.(error); ok {
+		return fmt.Errorf("failed to apply %s command via Raft: %w", cmd.Op, err2)
+	}
+	// Log success after confirming FSM application
+	rm.logger.Printf("%s successful: Key=%s", cmd.Op, cmd.Key)
+	return nil
+}
+
 // This is the core mechanism for replicating state changes.
-func (rm *raftManager) ApplyCommand(data []byte, timeout time.Duration) raft.ApplyFuture {
+func (rm *raftManager) Apply(data []byte, timeout time.Duration) raft.ApplyFuture {
 	return rm.raftNode.Apply(data, timeout)
 }
 
