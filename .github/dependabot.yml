@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Maintain dependencies for GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+
+  # Maintain dependencies for golang
+  - package-ecosystem: "gomod"
+    directory: "/" # Location of package manifests
+    schedule:
+      interval: "monthly" # Frequency of updates
+    open-pull-requests-limit: 10
+    target-branch: main
+    commit-message:
+      prefix: "[gomod] "
+    labels:
+      - "gomod dependencies"
