@@ -147,10 +147,13 @@ func (rm *raftManager) ApplyCommand(cmd *Command, timeout time.Duration) error {
 		return fmt.Errorf("failed to serialize %s command: %w", cmd.Op, err1)
 	}
 	applyFuture := rm.Apply(data, timeout)
+	if err2 := applyFuture.Error(); err2 != nil {
+		return fmt.Errorf("failed to apply %s command via Raft: %w", cmd.Op, err2)
+	}
 	// Check the response from the FSM application
 	response := applyFuture.Response()
-	if err2, ok := response.(error); ok {
-		return fmt.Errorf("failed to apply %s command via Raft: %w", cmd.Op, err2)
+	if err3, ok := response.(error); ok {
+		return fmt.Errorf("failed to apply %s command via Raft: %w", cmd.Op, err3)
 	}
 	// Log success after confirming FSM application
 	rm.logger.Printf("%s successful: Key=%s", cmd.Op, cmd.Key)
