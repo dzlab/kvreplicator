@@ -2,13 +2,8 @@ name: KVReplicator CI
 
 on:
   push:
-    paths:
-      - "kvreplicator/**"
-      - ".github/workflows/ci.yml" # Also run if workflow file itself changes
+    branches: [main]
   pull_request:
-    paths:
-      - "kvreplicator/**"
-      - ".github/workflows/ci.yml"
 
 jobs:
   build-and-test:
