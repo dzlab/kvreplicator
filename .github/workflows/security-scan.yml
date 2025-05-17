@@ -16,15 +16,47 @@ jobs:
       - name: Run GoSec security scanner
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
-          $(go env GOPATH)/bin/gosec ./...
+          $(go env GOPATH)/bin/gosec -fmt=txt -out=gosec-report.txt ./...
 
       - name: Run govulncheck vulnerability scanner
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          $(go env GOPATH)/bin/govulncheck ./...
+          $(go env GOPATH)/bin/govulncheck -json ./... > govulncheck-report.json
+
+      - name: Upload security scan results
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-scan-results
+          path: |
+            gosec-report.txt
+            govulncheck-report.json
 
       - name: Run CodeQL security scanner
         uses: github/codeql-action@v2
         with:
           languages: go
           queries: security-and-quality
+
+      - name: Comment on PR
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const gosecReport = fs.readFileSync('kvreplicator/gosec-report.txt', 'utf8');
+            const govulncheckReport = fs.readFileSync('kvreplicator/govulncheck-report.json', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: ${{ github.event.pull_request.number }},
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `
+              **GoSec Security Scan Report:**
+              \`\`\`
+              ${gosecReport}
+              \`\`\`
+              **GoVulnCheck Security Scan Report:**
+              \`\`\`
+              ${govulncheckReport}
+              \`\`\`
+              `
+            })
