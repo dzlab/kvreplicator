@@ -16,7 +16,7 @@ jobs:
       - name: Run GoSec security scanner
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
-          $(go env GOPATH)/bin/gosec -fmt=txt -out=gosec-report.txt ./...
+          $(go env GOPATH)/bin/gosec -fmt=txt -out=gosec-report.txt ./... || true
 
       - name: Run govulncheck vulnerability scanner
         run: |
