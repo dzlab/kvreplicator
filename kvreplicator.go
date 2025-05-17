@@ -10,7 +10,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
-	"github.com/hashicorp/raft-boltdb" // Using BoltDB for log and stable store
+	raftboltdb "github.com/hashicorp/raft-boltdb" // Using BoltDB for log and stable store
 )
 
 const (
@@ -24,7 +24,7 @@ type Config struct {
 	NodeID          string        // Unique ID for this node in the Raft cluster.
 	RaftBindAddress string        // TCP address for Raft to bind to (e.g., "localhost:7000").
 	RaftDataDir     string        // Directory to store Raft log and snapshots.
-	RocksDBPath     string        // Path for PebbleDB data. (Renamed conceptually, field name kept for now)
+	DBPath          string        // Path for PebbleDB data.
 	Bootstrap       bool          // Whether to bootstrap a new cluster if no existing state.
 	JoinAddresses   []string      // Addresses of existing cluster members to join (optional).
 	ApplyTimeout    time.Duration // Timeout for Raft apply operations.
@@ -56,15 +56,15 @@ func NewKVReplicator(cfg Config) (*KVReplicator, error) {
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("NodeID must be specified")
 	}
-	if cfg.RocksDBPath == "" { // This is now for Pebble
-		return nil, fmt.Errorf("RocksDBPath (for Pebble) must be specified")
+	if cfg.DBPath == "" {
+		return nil, fmt.Errorf("DBPath must be specified")
 	}
 
 	// Ensure Raft data directory exists
 	if err := os.MkdirAll(cfg.RaftDataDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create Raft data directory %s: %w", cfg.RaftDataDir, err)
 	}
-	// Pebble FSM will create its own directory based on RocksDBPath
+	// Pebble FSM will create its own directory based on DBPath
 
 	kv := &KVReplicator{
 		config: cfg,
@@ -72,7 +72,7 @@ func NewKVReplicator(cfg Config) (*KVReplicator, error) {
 	}
 
 	// Initialize the FSM (Finite State Machine) for Pebble
-	fsm, err := newPebbleFSM(cfg.RocksDBPath, cfg.Logger)
+	fsm, err := newPebbleFSM(cfg.DBPath, cfg.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Pebble FSM: %w", err)
 	}
@@ -159,7 +159,7 @@ func (kv *KVReplicator) Start() error {
 		kv.logger.Printf("INFO: Starting node. Will attempt to discover existing cluster or wait to be added.")
 	}
 
-	kv.logger.Printf("KVReplicator started. Node ID: %s, Raft Address: %s, Pebble Path: %s", kv.config.NodeID, kv.config.RaftBindAddress, kv.config.RocksDBPath)
+	kv.logger.Printf("KVReplicator started. Node ID: %s, Raft Address: %s, Pebble Path: %s", kv.config.NodeID, kv.config.RaftBindAddress, kv.config.DBPath)
 	return nil
 }
 
@@ -220,20 +220,20 @@ func (kv *KVReplicator) Delete(key string) error {
 	}
 	data, err := cmd.Serialize()
 	if err != nil {
-		return fmt.Errorf("failed to serialize Delete command: %w", err)
+		return fmt.Errorf("failed to serialize %s command: %w", cmd.Op, err)
 	}
 
 	applyFuture := kv.raftNode.Apply(data, kv.config.ApplyTimeout)
 	if err := applyFuture.Error(); err != nil {
-		return fmt.Errorf("failed to apply Delete command via Raft: %w", err)
+		return fmt.Errorf("failed to apply %s command via Raft: %w", cmd.Op, err)
 	}
 
 	response := applyFuture.Response()
 	if err, ok := response.(error); ok {
-		return fmt.Errorf("delete command failed to apply on FSM: %w", err)
+		return fmt.Errorf("%s command failed to apply on FSM: %w", cmd.Op, err)
 	}
 
-	kv.logger.Printf("Delete successful: Key=%s", key)
+	kv.logger.Printf("%s successful: Key=%s", cmd.Op, key)
 	return nil
 }
 
