@@ -18,7 +18,7 @@ var (
 	nodeID           string
 	raftBindAddr     string
 	raftDataDir      string
-	rocksDBDataDir   string
+	dbDataDir        string
 	bootstrapCluster bool
 	joinAddrStr      string
 	httpAddr         string
@@ -28,7 +28,7 @@ func init() {
 	flag.StringVar(&nodeID, "id", "node1", "Unique ID for this node")
 	flag.StringVar(&raftBindAddr, "raftaddr", "localhost:7000", "Raft bind address (host:port)")
 	flag.StringVar(&raftDataDir, "raftdir", "raft-data", "Raft data directory")
-	flag.StringVar(&rocksDBDataDir, "rocksdbdir", "rocksdb-data", "RocksDB data directory")
+	flag.StringVar(&dbDataDir, "dbdir", "db-data", "DB data directory")
 	flag.BoolVar(&bootstrapCluster, "bootstrap", false, "Bootstrap a new cluster (only for the first node)")
 	flag.StringVar(&joinAddrStr, "join", "", "Comma-separated addresses of cluster members to join (e.g., localhost:7000,localhost:7001)")
 	flag.StringVar(&httpAddr, "httpaddr", "localhost:8080", "HTTP API server address (host:port)")
@@ -47,16 +47,16 @@ func main() {
 		log.Fatal("-raftdir is required")
 	}
 	// rocksDBDataDir could be optional if the FSM defaults it, but good to specify
-	if rocksDBDataDir == "" {
-		log.Printf("WARN: -rocksdbdir is not set, using default path logic if any within FSM")
+	if dbDataDir == "" {
+		log.Printf("WARN: -dbdir is not set, using default path logic if any within FSM")
 	}
 
 	// Ensure data directories exist
 	if err := os.MkdirAll(raftDataDir, 0700); err != nil {
 		log.Fatalf("Failed to create Raft data directory: %v", err)
 	}
-	if err := os.MkdirAll(rocksDBDataDir, 0700); err != nil {
-		log.Fatalf("Failed to create RocksDB data directory: %v", err)
+	if err := os.MkdirAll(dbDataDir, 0700); err != nil {
+		log.Fatalf("Failed to create DB data directory: %v", err)
 	}
 
 	logger := log.New(os.Stdout, fmt.Sprintf("[%s] ", nodeID), log.LstdFlags|log.Lmicroseconds)
@@ -70,7 +70,7 @@ func main() {
 		NodeID:          nodeID,
 		RaftBindAddress: raftBindAddr,
 		RaftDataDir:     raftDataDir,
-		RocksDBPath:     rocksDBDataDir, // Pass this to your FSM for RocksDB
+		DBPath:          dbDataDir, // Pass this to your FSM for DB
 		Bootstrap:       bootstrapCluster,
 		JoinAddresses:   joinAddresses, // Used conceptually for now
 		Logger:          logger,

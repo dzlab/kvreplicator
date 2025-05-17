@@ -19,7 +19,7 @@ func setupKVReplicator(t *testing.T, nodeID string, bootstrap bool, joinAddresse
 	t.Helper()
 
 	raftDataDir := t.TempDir()
-	rocksDBDir := t.TempDir() // Though not used by the current FSM, good for future.
+	dbDir := t.TempDir() // Though not used by the current FSM, good for future.
 
 	// Find an available port for Raft
 	listener, err := net.Listen("tcp", "localhost:0")
@@ -33,7 +33,7 @@ func setupKVReplicator(t *testing.T, nodeID string, bootstrap bool, joinAddresse
 		NodeID:          nodeID,
 		RaftBindAddress: raftBindAddr,
 		RaftDataDir:     raftDataDir,
-		RocksDBPath:     rocksDBDir,
+		DBPath:          dbDir,
 		Bootstrap:       bootstrap,
 		JoinAddresses:   joinAddresses,
 		ApplyTimeout:    5 * time.Second, // Shorter timeout for tests
@@ -50,7 +50,7 @@ func setupKVReplicator(t *testing.T, nodeID string, bootstrap bool, joinAddresse
 			kv.Shutdown() // Ensure Raft node is shut down
 		}
 		os.RemoveAll(raftDataDir)
-		os.RemoveAll(rocksDBDir)
+		os.RemoveAll(dbDir)
 	}
 
 	return kv, cfg, cleanup
@@ -340,7 +340,7 @@ func TestKVReplicator_JoinLogic_Simplified(t *testing.T) {
 
 	nodeID := "joiningNode"
 	raftDataDir := t.TempDir()
-	rocksDBDir := t.TempDir()
+	dbDir := t.TempDir()
 
 	// Use a different port for this node
 	port := getAvailablePort(t)
@@ -350,7 +350,7 @@ func TestKVReplicator_JoinLogic_Simplified(t *testing.T) {
 		NodeID:          nodeID,
 		RaftBindAddress: raftBindAddr,
 		RaftDataDir:     raftDataDir,
-		RocksDBPath:     rocksDBDir,
+		DBPath:          dbDir,
 		Bootstrap:       false,                      // This node is not bootstrapping
 		JoinAddresses:   []string{"localhost:7000"}, // Dummy join address
 		ApplyTimeout:    5 * time.Second,
@@ -385,5 +385,5 @@ func TestKVReplicator_JoinLogic_Simplified(t *testing.T) {
 
 	// Clean up manually as defer might not cover all paths if Start fails early.
 	os.RemoveAll(raftDataDir)
-	os.RemoveAll(rocksDBDir)
+	os.RemoveAll(dbDir)
 }
