@@ -24,7 +24,7 @@ jobs:
           $(go env GOPATH)/bin/govulncheck -json ./... > govulncheck-report.json
 
       - name: Upload security scan results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: security-scan-results
           path: |
