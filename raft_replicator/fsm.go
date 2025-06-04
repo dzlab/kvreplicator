@@ -1,4 +1,4 @@
-package kvreplicator
+package raft_replicator
 
 import (
 	"archive/tar"
@@ -131,7 +131,6 @@ func (fsm *pebbleFSM) Snapshot() (raft.FSMSnapshot, error) {
 		fsm.logger.Printf("WARN: failed to remove old temp checkpoint dir %s: %v", checkpointDir, err)
 		// Continue, Checkpoint might fail if dir exists and is not empty
 	}
-
 
 	err = fsm.db.Checkpoint(checkpointDir)
 	if err != nil {
