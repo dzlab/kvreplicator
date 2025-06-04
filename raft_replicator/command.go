@@ -1,4 +1,4 @@
-package kvreplicator
+package raft_replicator
 
 import (
 	"encoding/json"
