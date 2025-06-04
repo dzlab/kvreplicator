@@ -64,21 +64,14 @@ var raftCmd = &cobra.Command{
 		config := raft_replicator.DefaultConfig(nodeID, raftBindAddr, raftDataDir, dbDataDir)
 		config.WithClusterConfig(bootstrapCluster, joinAddresses)
 
-		kvStore, err := raft_replicator.NewKVReplicator(config)
+		server, err := raft_replicator.NewRaftReplicationServer(config)
 		if err != nil {
-			logger.Fatalf("Failed to create KVReplicator: %v", err)
+			logger.Fatalf("Failed to create RAFT Replication Server: %v", err)
 		}
 
-		if err := kvStore.Start(); err != nil {
-			logger.Fatalf("Failed to start KVReplicator: %v", err)
+		if err := server.Start(httpAddr); err != nil {
+			logger.Fatalf("Failed to start RAFT Replication Server: %v", err)
 		}
-
-		logger.Printf("KVReplicator node %s started successfully.", nodeID)
-		logger.Printf("Raft listening on: %s", raftBindAddr)
-		logger.Printf("HTTP API listening on: %s", httpAddr)
-
-		// Setup HTTP server for API
-		raft_replicator.SetupHTTPServer(httpAddr, kvStore, logger)
 
 		// Wait for termination signal
 		quit := make(chan os.Signal, 1)
@@ -86,7 +79,7 @@ var raftCmd = &cobra.Command{
 		sig := <-quit
 		logger.Printf("Received signal: %s. Shutting down...", sig)
 
-		if err := kvStore.Shutdown(); err != nil {
+		if err := server.Shutdown(); err != nil {
 			logger.Fatalf("Error during shutdown: %v", err)
 		}
 		logger.Println("KVReplicator shut down gracefully.")

@@ -4,10 +4,52 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 )
 
-func SetupHTTPServer(addr string, store *KVReplicator, logger *log.Logger) {
+type RaftReplicationServer struct {
+	config  Config
+	kvStore *KVReplicator
+	logger  *log.Logger
+}
+
+func NewRaftReplicationServer(cfg Config) (*RaftReplicationServer, error) {
+	kvStore, err := NewKVReplicator(cfg)
+	if err != nil {
+		log.Fatalf("Failed to create KVReplicator: %v", err)
+		return nil, err
+	}
+
+	server := &RaftReplicationServer{
+		kvStore: kvStore,
+		config:  cfg,
+	}
+	return server, nil
+}
+
+func (rrs *RaftReplicationServer) Start(httpAddr string) error {
+
+	if err := rrs.kvStore.Start(); err != nil {
+		rrs.logger.Fatalf("Failed to start KVReplicator: %v", err)
+		return err
+	}
+
+	rrs.logger.Printf("KVReplicator node %s started successfully.", rrs.config.NodeID)
+	rrs.logger.Printf("Raft listening on: %s", rrs.config.RaftBindAddress)
+	rrs.logger.Printf("HTTP API listening on: %s", httpAddr)
+
+	// Setup HTTP server for API
+	setupHTTPServer(httpAddr, rrs.kvStore)
+	return nil
+}
+
+func (rrs *RaftReplicationServer) Shutdown() error {
+	return rrs.kvStore.Shutdown()
+}
+
+func setupHTTPServer(addr string, store *KVReplicator) {
+	logger := log.New(os.Stdout, "[raft_replicator] ", log.LstdFlags|log.Lmicroseconds)
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/kv", func(w http.ResponseWriter, r *http.Request) {
