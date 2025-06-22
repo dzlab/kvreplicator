@@ -1,125 +1,220 @@
 package wal_replicator
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/cockroachdb/pebble"
 )
 
-// WALReplicationServer provides a placeholder server for WAL-based replication.
-// This is a starting point and does not yet implement actual WAL replication logic.
+// WALReplicationServer provides a server for a key-value store using a local PebbleDB instance.
+// Note: This implementation currently acts as a local key-value store and does NOT include
+// Write-Ahead Logging (WAL) or replication logic. The membership/status endpoints are placeholders.
 type WALReplicationServer struct {
-	config WALConfig // Assuming a WALConfig struct will be defined later
-	logger *log.Logger
-	// Future fields for WAL logic, DB, etc.
+	config     WALConfig
+	logger     *log.Logger
+	db         *pebble.DB   // Add PebbleDB instance
+	httpServer *http.Server // Add HTTP server instance for graceful shutdown
 }
 
-// WALConfig is a placeholder for WAL replication configuration.
+// WALConfig is configuration for the WAL replication server.
 type WALConfig struct {
-	NodeID      string
-	BindAddress string // Address for this node to listen on (e.g., for replication, not just HTTP)
-	DataDir     string // Directory for WAL files, DB, etc.
+	NodeID              string
+	InternalBindAddress string // Address for this node to listen on for internal communication (e.g., replication, gossip)
+	HTTPAddr            string // Address for the HTTP API server to listen on (e.g., ":8080")
+	DataDir             string // Directory for WAL files, DB, etc. (used for PebbleDB path)
 	// Other WAL specific configuration parameters
 }
 
 // NewWALReplicationServer creates and initializes a new WALReplicationServer instance.
-// Currently, this is a placeholder.
 func NewWALReplicationServer(cfg WALConfig) (*WALReplicationServer, error) {
 	logger := log.New(os.Stdout, fmt.Sprintf("[%s-wal] ", cfg.NodeID), log.LstdFlags|log.Lmicroseconds)
 
-	// --- Placeholder Initialization Logic ---
-	logger.Printf("Initializing WALReplicationServer for node %s at address %s with data dir %s",
-		cfg.NodeID, cfg.BindAddress, cfg.DataDir)
+	logger.Printf("Initializing WALReplicationServer for node %s with data dir %s",
+		cfg.NodeID, cfg.DataDir)
 
-	// Simulate some setup (e.g., checking data directory, initializing components)
 	if cfg.DataDir == "" {
-		logger.Println("WARN: DataDir is not set, using default logic if any.")
-	} else {
-		if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
-			logger.Printf("ERROR: Failed to create data directory %s: %v", cfg.DataDir, err)
-			return nil, fmt.Errorf("failed to create data directory: %w", err)
-		}
+		return nil, fmt.Errorf("WALConfig error: DataDir must be specified")
 	}
 
-	// Placeholder for actual WAL replication components initialization
-	// walProcessor, err := newWALProcessor(...)
-	// db, err := openDB(...)
-	// ...
+	// Ensure data directory exists
+	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+		logger.Printf("ERROR: Failed to create data directory %s: %v", cfg.DataDir, err)
+		return nil, fmt.Errorf("failed to create data directory: %w", err)
+	}
+
+	// Open PebbleDB
+	opts := &pebble.Options{} // Use default options for now
+	db, err := pebble.Open(cfg.DataDir, opts)
+	if err != nil {
+		logger.Printf("ERROR: Failed to open Pebble DB at %s: %v", cfg.DataDir, err)
+		return nil, fmt.Errorf("failed to open pebble db: %w", err)
+	}
+	logger.Printf("Pebble DB opened successfully at %s", cfg.DataDir)
 
 	server := &WALReplicationServer{
 		config: cfg,
 		logger: logger,
-		// Assign initialized components
+		db:     db, // Assign the opened DB
 	}
-	// --- End Placeholder Initialization Logic ---
 
-	logger.Println("WALReplicationServer placeholder created successfully.")
+	logger.Println("WALReplicationServer instance created successfully.")
 	return server, nil
 }
 
 // Start initializes the WALReplicationServer and starts its HTTP API server.
 // It does NOT start actual WAL replication logic yet.
-func (wrs *WALReplicationServer) Start(httpAddr string) error {
+func (wrs *WALReplicationServer) Start() error {
 	wrs.logger.Printf("WALReplicationServer node %s starting...", wrs.config.NodeID)
 
 	// --- Placeholder Start Logic ---
-	// Simulate starting internal WAL components
-	// wrs.walProcessor.Start()
-	// wrs.db.Connect()
-	// ...
+	// Simulate starting internal WAL components (None implemented yet)
 	wrs.logger.Println("Placeholder WAL internal components started.")
 	// --- End Placeholder Start Logic ---
 
 	wrs.logger.Printf("WALReplicationServer node %s started successfully.", wrs.config.NodeID)
-	wrs.logger.Printf("Internal address (placeholder): %s", wrs.config.BindAddress)
-	wrs.logger.Printf("HTTP API listening on: %s", httpAddr)
+	wrs.logger.Printf("Internal address (placeholder): %s", wrs.config.InternalBindAddress)
+	wrs.logger.Printf("HTTP API listening on: %s", wrs.config.HTTPAddr)
 
-	// Setup and start HTTP server for API
-	setupWALHTTPServer(httpAddr, wrs) // Pass wrs to handlers
+	// Setup HTTP server for API
+	mux := wrs.setupWALHTTPServerMux()
+
+	wrs.httpServer = &http.Server{
+		Addr:    wrs.config.HTTPAddr,
+		Handler: mux,
+		// Add read/write timeouts for production use
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	go func() {
+		wrs.logger.Printf("Placeholder WAL HTTP server listening on %s", wrs.config.HTTPAddr)
+		if err := wrs.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			wrs.logger.Fatalf("Placeholder WAL HTTP server ListenAndServe: %v", err)
+		}
+	}()
+
 	return nil
 }
 
-// Shutdown gracefully shuts down the WALReplicationServer.
-// Currently, this is a placeholder.
+// Shutdown gracefully shuts down the WALReplicationServer, including the HTTP server and PebbleDB.
 func (wrs *WALReplicationServer) Shutdown() error {
 	wrs.logger.Println("Shutting down WALReplicationServer placeholder...")
 
+	// Shutdown HTTP server
+	if wrs.httpServer != nil {
+		wrs.logger.Println("Shutting down HTTP server...")
+		// Create a context with a timeout for the shutdown
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := wrs.httpServer.Shutdown(shutdownCtx); err != nil {
+			wrs.logger.Printf("ERROR: HTTP server shutdown error: %v", err)
+			// Continue, but report the error
+		} else {
+			wrs.logger.Println("HTTP server shut down.")
+		}
+		wrs.httpServer = nil
+	}
+
 	// --- Placeholder Shutdown Logic ---
-	// Simulate shutting down internal WAL components
-	// wrs.walProcessor.Stop()
-	// wrs.db.Close()
-	// ...
+	// Simulate shutting down internal WAL components (None implemented yet)
 	wrs.logger.Println("Placeholder WAL internal components shut down.")
 	// --- End Placeholder Shutdown Logic ---
+
+	// Close PebbleDB
+	if err := wrs.Close(); err != nil {
+		wrs.logger.Printf("ERROR: Failed to close Pebble DB during shutdown: %v", err)
+		// Continue with other shutdown steps if possible, but report the error
+	}
 
 	wrs.logger.Println("WALReplicationServer placeholder shut down successfully.")
 	return nil
 }
 
-// --- Placeholder API Handlers ---
+// Close closes the underlying PebbleDB database.
+func (wrs *WALReplicationServer) Close() error {
+	wrs.logger.Println("Closing Pebble DB...")
+	if wrs.db != nil {
+		err := wrs.db.Close()
+		if err != nil {
+			wrs.logger.Printf("ERROR: failed to close Pebble DB: %v", err)
+			return err
+		}
+		wrs.logger.Println("Pebble DB closed.")
+		wrs.db = nil
+	} else {
+		wrs.logger.Println("Close called, but Pebble DB was already nil.")
+	}
+	return nil
+}
 
-// Placeholder method to simulate getting a key
+// Get retrieves a value for a given key from the local PebbleDB.
 func (wrs *WALReplicationServer) Get(key string) (string, error) {
-	wrs.logger.Printf("Received placeholder GET request for key: %s", key)
-	// In a real implementation, this would read from the local DB
-	return fmt.Sprintf("Placeholder value for %s (WAL not implemented)", key), nil
+	wrs.logger.Printf("DB Get: key=%s", key) // Using Printf for potentially noisy ops
+	if wrs.db == nil {
+		return "", fmt.Errorf("pebble db is not initialized")
+	}
+
+	valueBytes, closer, err := wrs.db.Get([]byte(key))
+	if err != nil {
+		if err == pebble.ErrNotFound {
+			wrs.logger.Printf("Key not found: %s", key)
+			return "", fmt.Errorf("key not found: %s", key)
+		}
+		wrs.logger.Printf("ERROR: Pebble Get failed for key %s: %v", key, err)
+		return "", fmt.Errorf("pebble get failed for key %s: %w", key, err)
+	}
+	defer closer.Close()
+
+	// Make a copy of the valueBytes as it's only valid until closer.Close()
+	valueStr := string(valueBytes)
+	wrs.logger.Printf("DB Get successful: key=%s", key)
+	return valueStr, nil
 }
 
-// Placeholder method to simulate putting a key
+// Put sets a value for a given key in the local PebbleDB.
+// Note: This operation is NOT replicated to other nodes in this placeholder implementation.
 func (wrs *WALReplicationServer) Put(key, value string) error {
-	wrs.logger.Printf("Received placeholder PUT request for key: %s, value: %s", key, value)
-	// In a real implementation, this would write to WAL and propagate
-	return fmt.Errorf("PUT operation not implemented for WAL replicator yet")
+	wrs.logger.Printf("DB Put: key=%s, value=%s", key, value) // Using Printf for potentially noisy ops
+	if wrs.db == nil {
+		return fmt.Errorf("pebble db is not initialized")
+	}
+
+	writeOpts := pebble.Sync // Ensure data is flushed to disk
+	err := wrs.db.Set([]byte(key), []byte(value), writeOpts)
+	if err != nil {
+		wrs.logger.Printf("ERROR: Pebble Set failed for Key=%s: %v", key, err)
+		return fmt.Errorf("pebble set failed for key %s: %w", key, err)
+	}
+	wrs.logger.Printf("Successfully set key %s", key)
+	return nil
 }
 
-// Placeholder method to simulate deleting a key
+// Delete removes a key from the local PebbleDB.
+// Note: This operation is NOT replicated to other nodes in this placeholder implementation.
 func (wrs *WALReplicationServer) Delete(key string) error {
-	wrs.logger.Printf("Received placeholder DELETE request for key: %s", key)
-	// In a real implementation, this would write to WAL and propagate
-	return fmt.Errorf("DELETE operation not implemented for WAL replicator yet")
+	wrs.logger.Printf("DB Delete: key=%s", key) // Using Printf for potentially noisy ops
+	if wrs.db == nil {
+		return fmt.Errorf("pebble db is not initialized")
+	}
+
+	writeOpts := pebble.Sync // Ensure data is flushed to disk
+	err := wrs.db.Delete([]byte(key), writeOpts)
+	if err != nil {
+		// Pebble's Delete doesn't error if key not found, it's a successful deletion of nothing.
+		wrs.logger.Printf("ERROR: Pebble Delete failed for Key=%s: %v", key, err)
+		return fmt.Errorf("pebble delete failed for key %s: %w", key, err)
+	}
+	wrs.logger.Printf("Successfully deleted key %s", key)
+	// Pebble's Delete doesn't error if key not found, it's a successful deletion of nothing.
+	wrs.logger.Printf("DB Delete successful: key=%s", key)
+	return nil
 }
 
 // Placeholder method for AddNode (WAL equivalent of AddVoter/AddLearner)
@@ -147,7 +242,7 @@ func (wrs *WALReplicationServer) IsPrimary() bool {
 func (wrs *WALReplicationServer) GetPrimary() string {
 	// In a real implementation, this would return the primary's address
 	wrs.logger.Println("Received placeholder GetPrimary request.")
-	return "placeholder-primary-address:xxxx"
+	return "placeholder-primary-address:xxxx (WAL replication not implemented)"
 }
 
 // Placeholder method for GetStats
@@ -155,137 +250,125 @@ func (wrs *WALReplicationServer) GetStats() map[string]string {
 	wrs.logger.Println("Received placeholder GetStats request.")
 	// In a real implementation, this would return WAL/replication stats
 	return map[string]string{
-		"status":      "placeholder",
-		"replication": "not implemented",
+		"status":             "placeholder - WAL replication not implemented",
+		"replication_status": "not implemented",
+		"node_id":            wrs.config.NodeID,
+		"data_dir":           wrs.config.DataDir,
 	}
 }
 
-// setupWALHTTPServer sets up the HTTP API server for the WAL replicator placeholder.
-func setupWALHTTPServer(addr string, server *WALReplicationServer) {
-	logger := server.logger // Use the server's logger
-	mux := http.NewServeMux()
+// --- HTTP Handler Methods ---
 
-	// KV Endpoints (Placeholder)
-	mux.HandleFunc("/kv", func(w http.ResponseWriter, r *http.Request) {
-		key := r.URL.Query().Get("key")
-		if key == "" {
-			http.Error(w, "key parameter is required", http.StatusBadRequest)
-			return
-		}
-
-		switch r.Method {
-		case http.MethodGet:
-			// Call placeholder Get
-			value, err := server.Get(key)
-			if err != nil {
-				// Simulate not found error
-				if strings.Contains(err.Error(), "key not found") {
-					http.Error(w, err.Error(), http.StatusNotFound)
-				} else {
-					http.Error(w, fmt.Sprintf("Placeholder Get failed: %v", err), http.StatusInternalServerError)
-				}
-				return
-			}
-			fmt.Fprint(w, value)
-		case http.MethodPut:
-			value := r.URL.Query().Get("value")
-			// Note: For a real WAL, Put would write to WAL and might not block for full replication.
-			// The response might indicate pending replication or be asynchronous.
-			// This placeholder just returns an error.
-			err := server.Put(key, value)
-			if err != nil {
-				// Simulate not primary error (if applicable in WAL model)
-				if strings.Contains(err.Error(), "not the primary") {
-					primaryAddr := server.GetPrimary()
-					http.Error(w, fmt.Sprintf("Not primary. Try primary at %s. Error: %v", primaryAddr, err), http.StatusConflict)
-				} else {
-					http.Error(w, fmt.Sprintf("Placeholder Put failed: %v", err), http.StatusInternalServerError)
-				}
-				return
-			}
-			fmt.Fprint(w, "OK (Placeholder - operation not truly applied)")
-		case http.MethodDelete:
-			err := server.Delete(key)
-			if err != nil {
-				if strings.Contains(err.Error(), "not the primary") {
-					primaryAddr := server.GetPrimary()
-					http.Error(w, fmt.Sprintf("Not primary. Try primary at %s. Error: %v", primaryAddr, err), http.StatusConflict)
-				} else {
-					http.Error(w, fmt.Sprintf("Placeholder Delete failed: %v", err), http.StatusInternalServerError)
-				}
-				return
-			}
-			fmt.Fprint(w, "OK (Placeholder - operation not truly applied)")
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-
-	// Membership Endpoints (Placeholder)
-	mux.HandleFunc("/wal/join", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
-		nodeID := r.URL.Query().Get("nodeId")
-		nodeAddr := r.URL.Query().Get("address") // Using 'address' for WAL to distinguish from Raft 'raftAddr'
-		if nodeID == "" || nodeAddr == "" {
-			http.Error(w, "nodeId and address parameters are required", http.StatusBadRequest)
-			return
-		}
-		// Call placeholder AddNode
-		if err := server.AddNode(nodeID, nodeAddr); err != nil {
-			http.Error(w, fmt.Sprintf("Placeholder AddNode failed: %v", err), http.StatusInternalServerError)
-			return
-		}
-		fmt.Fprint(w, "OK (Placeholder - node not truly added)")
-	})
-
-	mux.HandleFunc("/wal/remove", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
-		nodeID := r.URL.Query().Get("nodeId")
-		if nodeID == "" {
-			http.Error(w, "nodeId parameter is required", http.StatusBadRequest)
-			return
-		}
-		// Call placeholder RemoveNode
-		if err := server.RemoveNode(nodeID); err != nil {
-			http.Error(w, fmt.Sprintf("Placeholder RemoveNode failed: %v", err), http.StatusInternalServerError)
-			return
-		}
-		fmt.Fprint(w, "OK (Placeholder - node not truly removed)")
-	})
-
-	// Status Endpoints (Placeholder)
-	mux.HandleFunc("/wal/primary", func(w http.ResponseWriter, r *http.Request) {
-		primary := server.GetPrimary()
-		fmt.Fprintf(w, "Placeholder Primary address: %s\n", primary)
-		fmt.Fprintf(w, "Placeholder: Is this node primary: %t\n", server.IsPrimary())
-	})
-
-	mux.HandleFunc("/wal/stats", func(w http.ResponseWriter, r *http.Request) {
-		stats := server.GetStats()
-		for k, v := range stats {
-			fmt.Fprintf(w, "%s: %s\n", k, v)
-		}
-	})
-
-	httpServer := &http.Server{
-		Addr:    addr,
-		Handler: mux,
-		// Add read/write timeouts for production use
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  120 * time.Second,
+// handleKV is the HTTP handler for /kv requests.
+func (wrs *WALReplicationServer) handleKV(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		http.Error(w, "key parameter is required", http.StatusBadRequest)
+		return
 	}
 
-	go func() {
-		logger.Printf("Placeholder WAL HTTP server listening on %s", addr)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatalf("Placeholder WAL HTTP server ListenAndServe: %v", err)
+	switch r.Method {
+	case http.MethodGet:
+		value, err := wrs.Get(key)
+		if err != nil {
+			// Differentiate between not found and other errors
+			if strings.Contains(err.Error(), "key not found") {
+				http.Error(w, err.Error(), http.StatusNotFound)
+			} else {
+				http.Error(w, fmt.Sprintf("Failed to get key from local DB: %v", err), http.StatusInternalServerError)
+			}
+			return
 		}
-	}()
+		fmt.Fprint(w, value)
+	case http.MethodPut:
+		value := r.URL.Query().Get("value")
+		if value == "" {
+			http.Error(w, "value parameter is required for PUT", http.StatusBadRequest)
+			return
+		}
+		// Call the local Put method
+		err := wrs.Put(key, value)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to put key to local DB: %v", err), http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprint(w, "OK (Operation applied to local DB)")
+	case http.MethodDelete:
+		// Call the local Delete method
+		err := wrs.Delete(key)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to delete key from local DB: %v", err), http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprint(w, "OK (Operation applied to local DB)")
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleWALJoin is the HTTP handler for /wal/join requests (Placeholder).
+func (wrs *WALReplicationServer) handleWALJoin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	nodeID := r.URL.Query().Get("nodeId")
+	nodeAddr := r.URL.Query().Get("address")
+	if nodeID == "" || nodeAddr == "" {
+		http.Error(w, "nodeId and address parameters are required", http.StatusBadRequest)
+		return
+	}
+	// Call placeholder AddNode
+	err := wrs.AddNode(nodeID, nodeAddr) // This will return the "not implemented" error
+	http.Error(w, fmt.Sprintf("Placeholder AddNode failed: %v", err), http.StatusNotImplemented)
+}
+
+// handleWALRemove is the HTTP handler for /wal/remove requests (Placeholder).
+func (wrs *WALReplicationServer) handleWALRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	nodeID := r.URL.Query().Get("nodeId")
+	if nodeID == "" {
+		http.Error(w, "nodeId parameter is required", http.StatusBadRequest)
+		return
+	}
+	// Call placeholder RemoveNode
+	err := wrs.RemoveNode(nodeID) // This will return the "not implemented" error
+	http.Error(w, fmt.Sprintf("Placeholder RemoveNode failed: %v", err), http.StatusNotImplemented)
+}
+
+// handleWALPrimary is the HTTP handler for /wal/primary requests (Placeholder).
+func (wrs *WALReplicationServer) handleWALPrimary(w http.ResponseWriter, r *http.Request) {
+	primary := wrs.GetPrimary() // Calls placeholder
+	fmt.Fprintf(w, "Placeholder Primary address: %s\n", primary)
+	fmt.Fprintf(w, "Placeholder: Is this node primary: %t (WAL replication not implemented)\n", wrs.IsPrimary()) // Calls placeholder
+}
+
+// handleWALStats is the HTTP handler for /wal/stats requests (Placeholder).
+func (wrs *WALReplicationServer) handleWALStats(w http.ResponseWriter, r *http.Request) {
+	stats := wrs.GetStats() // Calls placeholder
+	for k, v := range stats {
+		fmt.Fprintf(w, "%s: %s\n", k, v)
+	}
+}
+
+// setupWALHTTPServerMux sets up the HTTP request multiplexer for the WAL replicator placeholder.
+// It registers all the handler functions.
+func (wrs *WALReplicationServer) setupWALHTTPServerMux() *http.ServeMux {
+	mux := http.NewServeMux()
+
+	// Register KV Endpoints
+	mux.HandleFunc("/kv", wrs.handleKV)
+
+	// Register Membership Endpoints (Placeholder)
+	mux.HandleFunc("/wal/join", wrs.handleWALJoin)
+	mux.HandleFunc("/wal/remove", wrs.handleWALRemove)
+
+	// Register Status Endpoints (Placeholder)
+	mux.HandleFunc("/wal/primary", wrs.handleWALPrimary)
+	mux.HandleFunc("/wal/stats", wrs.handleWALStats)
+
+	return mux
 }

@@ -119,19 +119,19 @@ var walCmd = &cobra.Command{
 		logger.Println("Starting WAL replicator server (placeholder)...")
 
 		// Placeholder WALConfig and Server creation
-		walConfig := wal_replicator.WALConfig{
-			NodeID:      walNodeID,
-			BindAddress: walBindAddr,
-			DataDir:     walDataDir,
-			// Add other WAL specific config later
+		cfg := wal_replicator.WALConfig{
+			NodeID:              walNodeID,
+			InternalBindAddress: walBindAddr,
+			HTTPAddr:            walHTTPAddr,
+			DataDir:             walDataDir,
 		}
 
-		server, err := wal_replicator.NewWALReplicationServer(walConfig)
+		server, err := wal_replicator.NewWALReplicationServer(cfg)
 		if err != nil {
 			logger.Fatalf("Failed to create WAL Replication Server (placeholder): %v", err)
 		}
 
-		if err := server.Start(walHTTPAddr); err != nil {
+		if err := server.Start(); err != nil {
 			logger.Fatalf("Failed to start WAL Replication Server (placeholder): %v", err)
 		}
 
