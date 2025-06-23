@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/go-zookeeper/zk" // Import ZooKeeper client
 )
 
 // WALReplicationServer provides a server for a key-value store using a local PebbleDB instance.
@@ -20,14 +21,16 @@ type WALReplicationServer struct {
 	logger     *log.Logger
 	db         *pebble.DB   // Add PebbleDB instance
 	httpServer *http.Server // Add HTTP server instance for graceful shutdown
+	zkConn     *zk.Conn     // Add ZooKeeper connection
 }
 
 // WALConfig is configuration for the WAL replication server.
 type WALConfig struct {
 	NodeID              string
-	InternalBindAddress string // Address for this node to listen on for internal communication (e.g., replication, gossip)
-	HTTPAddr            string // Address for the HTTP API server to listen on (e.g., ":8080")
-	DataDir             string // Directory for WAL files, DB, etc. (used for PebbleDB path)
+	InternalBindAddress string   // Address for this node to listen on for internal communication (e.g., replication, gossip)
+	HTTPAddr            string   // Address for the HTTP API server to listen on (e.g., ":8080")
+	DataDir             string   // Directory for WAL files, DB, etc. (used for PebbleDB path)
+	ZkServers           []string // Addresses of ZooKeeper servers (e.g., ["localhost:2181"])
 	// Other WAL specific configuration parameters
 }
 
@@ -60,7 +63,44 @@ func NewWALReplicationServer(cfg WALConfig) (*WALReplicationServer, error) {
 	server := &WALReplicationServer{
 		config: cfg,
 		logger: logger,
-		db:     db, // Assign the opened DB
+		db:     db,  // Assign the opened DB
+		zkConn: nil, // Initialize zkConn to nil
+	}
+
+	// Connect to ZooKeeper
+	if len(cfg.ZkServers) == 0 {
+		logger.Println("WARNING: No ZooKeeper servers specified in config. Membership features will not work.")
+	} else {
+		logger.Printf("Connecting to ZooKeeper at %v...", cfg.ZkServers)
+		conn, _, err := zk.Connect(cfg.ZkServers, time.Second*10) // 10-second timeout for connection
+		if err != nil {
+			// Close DB if ZK connection fails, to clean up
+			db.Close()
+			logger.Printf("ERROR: Failed to connect to ZooKeeper: %v", err)
+			return nil, fmt.Errorf("failed to connect to zookeeper: %w", err)
+		}
+		logger.Println("ZooKeeper connection established.")
+		// Basic check: ensure root path exists
+		exists, _, err := conn.Exists("/kvreplicator/wal")
+		if err != nil {
+			conn.Close()
+			db.Close()
+			logger.Printf("ERROR: Failed to check existence of ZK path /kvreplicator/wal: %v", err)
+			return nil, fmt.Errorf("zookeeper path check failed: %w", err)
+		}
+		if !exists {
+			logger.Println("ZK path /kvreplicator/wal does not exist, creating...")
+			_, err = conn.Create("/kvreplicator/wal", nil, 0, zk.WorldACL(zk.PermAll))
+			if err != nil && err != zk.ErrNodeExists { // ErrNodeExists is ok
+				conn.Close()
+				db.Close()
+				logger.Printf("ERROR: Failed to create ZK path /kvreplicator/wal: %v", err)
+				return nil, fmt.Errorf("failed to create zookeeper path: %w", err)
+			}
+			logger.Println("ZK path /kvreplicator/wal created or already exists.")
+		}
+		// Assign the successful ZK connection to the server instance
+		server.zkConn = conn
 	}
 
 	logger.Println("WALReplicationServer instance created successfully.")
@@ -76,6 +116,26 @@ func (wrs *WALReplicationServer) Start() error {
 	// Simulate starting internal WAL components (None implemented yet)
 	wrs.logger.Println("Placeholder WAL internal components started.")
 	// --- End Placeholder Start Logic ---
+
+	// Register node in ZooKeeper
+	if wrs.zkConn != nil {
+		nodePath := fmt.Sprintf("/kvreplicator/wal/nodes/%s", wrs.config.NodeID)
+		wrs.logger.Printf("Registering node in ZooKeeper at %s...", nodePath)
+		// Create an ephemeral node. If the server crashes, this node will be deleted.
+		_, err := wrs.zkConn.Create(nodePath, []byte(wrs.config.InternalBindAddress), zk.FlagEphemeral, zk.WorldACL(zk.PermAll))
+		if err != nil && err != zk.ErrNodeExists {
+			// If the node already exists, it might indicate a previous unclean shutdown
+			// For simplicity, we'll just log it here. A real system might handle this differently.
+			if err == zk.ErrNodeExists {
+				wrs.logger.Printf("WARNING: Ephemeral ZK node %s already exists. This might indicate an unclean shutdown.", nodePath)
+			} else {
+				// We don't fail startup for ZK registration failure for now, but it's a critical warning.
+				wrs.logger.Printf("ERROR: Failed to create ephemeral ZK node %s: %v", nodePath, err)
+			}
+		} else {
+			wrs.logger.Printf("Successfully registered node in ZooKeeper at %s", nodePath)
+		}
+	}
 
 	wrs.logger.Printf("WALReplicationServer node %s started successfully.", wrs.config.NodeID)
 	wrs.logger.Printf("Internal address (placeholder): %s", wrs.config.InternalBindAddress)
@@ -120,6 +180,14 @@ func (wrs *WALReplicationServer) Shutdown() error {
 			wrs.logger.Println("HTTP server shut down.")
 		}
 		wrs.httpServer = nil
+	}
+
+	// Close ZooKeeper connection
+	if wrs.zkConn != nil {
+		wrs.logger.Println("Closing ZooKeeper connection...")
+		wrs.zkConn.Close()
+		wrs.logger.Println("ZooKeeper connection closed.")
+		wrs.zkConn = nil
 	}
 
 	// --- Placeholder Shutdown Logic ---
