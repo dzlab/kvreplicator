@@ -4,6 +4,7 @@ go 1.20
 
 require (
 	github.com/cockroachdb/pebble v1.1.5
+	github.com/go-zookeeper/zk v1.0.4
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-uuid v1.0.3
 	github.com/hashicorp/raft v1.7.3
