@@ -25,10 +25,11 @@ var (
 
 // Variables specifically for the WAL subcommand
 var (
-	walNodeID   string
-	walBindAddr string // Internal bind address for WAL replication communication
-	walDataDir  string // Directory for WAL files, DB, etc.
-	walHTTPAddr string // HTTP API server address for WAL
+	walNodeID    string
+	walBindAddr  string // Internal bind address for WAL replication communication
+	walDataDir   string // Directory for WAL files, DB, etc.
+	walHTTPAddr  string // HTTP API server address for WAL
+	walZkServers string // Comma-separated addresses of Zookeeper servers
 )
 
 var rootCmd = &cobra.Command{
@@ -118,12 +119,18 @@ var walCmd = &cobra.Command{
 		logger := log.New(os.Stdout, fmt.Sprintf("[%s-wal] ", walNodeID), log.LstdFlags|log.Lmicroseconds)
 		logger.Println("Starting WAL replicator server (placeholder)...")
 
+		var zkServers []string
+		if walZkServers != "" {
+			zkServers = strings.Split(walZkServers, ",")
+		}
+
 		// Placeholder WALConfig and Server creation
 		cfg := wal_replicator.WALConfig{
 			NodeID:              walNodeID,
 			InternalBindAddress: walBindAddr,
 			HTTPAddr:            walHTTPAddr,
 			DataDir:             walDataDir,
+			ZkServers:           zkServers, // Include Zookeeper servers in config
 		}
 
 		server, err := wal_replicator.NewWALReplicationServer(cfg)
@@ -161,6 +168,7 @@ func init() {
 	walCmd.PersistentFlags().StringVar(&walBindAddr, "bindaddr", "localhost:7000", "Internal bind address for replication (host:port)")
 	walCmd.PersistentFlags().StringVar(&walDataDir, "datadir", "wal-data", "Data directory for WAL files and DB")
 	walCmd.PersistentFlags().StringVar(&walHTTPAddr, "httpaddr", "localhost:8081", "HTTP API server address (host:port)") // Default to a different port than Raft
+	walCmd.PersistentFlags().StringVar(&walZkServers, "zkservers", "", "Comma-separated addresses of Zookeeper servers (e.g., localhost:2181)")
 
 	rootCmd.AddCommand(raftCmd)
 	rootCmd.AddCommand(walCmd)
