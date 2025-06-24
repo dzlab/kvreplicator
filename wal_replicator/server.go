@@ -22,6 +22,7 @@ type WALReplicationServer struct {
 	db         *pebble.DB   // Add PebbleDB instance
 	httpServer *http.Server // Add HTTP server instance for graceful shutdown
 	zkConn     *zk.Conn     // Add ZooKeeper connection
+	zkManager  *ZKManager   // Add ZKManager instance for ZooKeeper operations
 }
 
 // WALConfig is configuration for the WAL replication server.
@@ -101,6 +102,7 @@ func NewWALReplicationServer(cfg WALConfig) (*WALReplicationServer, error) {
 		}
 		// Assign the successful ZK connection to the server instance
 		server.zkConn = conn
+		server.zkManager = NewZKManager(conn, logger, cfg.NodeID) // Initialize ZKManager
 	}
 
 	logger.Println("WALReplicationServer instance created successfully.")
@@ -117,53 +119,22 @@ func (wrs *WALReplicationServer) Start() error {
 	wrs.logger.Println("Placeholder WAL internal components started.")
 	// --- End Placeholder Start Logic ---
 
-	// Register node in ZooKeeper
-	if wrs.zkConn != nil {
-		nodePath := fmt.Sprintf("/kvreplicator/wal/nodes/%s", wrs.config.NodeID)
-		wrs.logger.Printf("Registering node in ZooKeeper at %s...", nodePath)
-		// Create an ephemeral node. If the server crashes, this node will be deleted.
-		_, err := wrs.zkConn.Create(nodePath, []byte(wrs.config.InternalBindAddress), zk.FlagEphemeral, zk.WorldACL(zk.PermAll))
-		if err != nil && err != zk.ErrNodeExists {
-			// If the node already exists, it might indicate a previous unclean shutdown
-			// For simplicity, we'll just log it here. A real system might handle this differently.
-			if err == zk.ErrNodeExists {
-				wrs.logger.Printf("WARNING: Ephemeral ZK node %s already exists. This might indicate an unclean shutdown.", nodePath)
-			} else {
-				// We don't fail startup for ZK registration failure for now, but it's a critical warning.
-				wrs.logger.Printf("ERROR: Failed to create ephemeral ZK node %s: %v", nodePath, err)
-			}
-		} else {
-			wrs.logger.Printf("Successfully registered node in ZooKeeper at %s", nodePath)
+	// Register node in ZooKeeper and set up watches
+	if wrs.zkManager != nil {
+		err := wrs.zkManager.RegisterNode(wrs.config.InternalBindAddress)
+		if err != nil {
+			wrs.logger.Printf("Error during ZK node registration: %v", err)
+			// Decide if startup should fail here or continue with a warning
 		}
 
-		// Set up initial watch for children on the nodes path
-		nodesPath := "/kvreplicator/wal/nodes"
-		_, _, eventChan, err := wrs.zkConn.ChildrenW(nodesPath)
-		if err != nil && err != zk.ErrNoNode {
-			wrs.logger.Printf("WARNING: Could not set watch on %s: %v", nodesPath, err)
-		} else if err == zk.ErrNoNode {
-			// If the nodes path doesn't exist, try creating it (persistent)
-			_, err := wrs.zkConn.Create(nodesPath, []byte{}, 0, zk.WorldACL(zk.PermAll))
-			if err != nil && err != zk.ErrNodeExists {
-				wrs.logger.Printf("ERROR: Failed to create ZK nodes path %s: %v", nodesPath, err)
-			} else if err == zk.ErrNodeExists {
-				wrs.logger.Printf("ZK nodes path %s already exists.", nodesPath)
-			} else {
-				wrs.logger.Printf("Created ZK nodes path %s.", nodesPath)
-				// Set watch again after creation
-				_, _, eventChan, err = wrs.zkConn.ChildrenW(nodesPath)
-				if err != nil {
-					wrs.logger.Printf("WARNING: Could not set watch on %s after creation: %v", nodesPath, err)
-				} else {
-					wrs.logger.Printf("Successfully set initial watch on %s for children changes.", nodesPath)
-				}
-			}
-		} else {
-			wrs.logger.Printf("Successfully set initial watch on %s for children changes.", nodesPath)
+		eventChan, err := wrs.zkManager.EnsureNodesPathExists()
+		if err != nil {
+			wrs.logger.Printf("Error ensuring ZK nodes path exists or setting watch: %v", err)
+			// Decide if startup should fail here or continue with a warning
+		} else if eventChan != nil {
+			// Start goroutine to handle ZooKeeper events
+			go wrs.handleZkEvents(eventChan) // Pass the event channel to a new handler function
 		}
-
-		// Start goroutine to handle ZooKeeper events
-		go wrs.handleZkEvents(eventChan) // Pass the event channel to a new handler function
 	}
 
 	wrs.logger.Printf("WALReplicationServer node %s started successfully.", wrs.config.NodeID)
