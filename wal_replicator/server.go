@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -17,12 +18,14 @@ import (
 // Note: This implementation currently acts as a local key-value store and does NOT include
 // Write-Ahead Logging (WAL) or replication logic. The membership/status endpoints are placeholders.
 type WALReplicationServer struct {
-	config     WALConfig
-	logger     *log.Logger
-	db         *pebble.DB   // Add PebbleDB instance
-	httpServer *http.Server // Add HTTP server instance for graceful shutdown
-	zkConn     *zk.Conn     // Add ZooKeeper connection
-	zkManager  *ZKManager   // Add ZKManager instance for ZooKeeper operations
+	config      WALConfig
+	logger      *log.Logger
+	db          *pebble.DB   // Add PebbleDB instance
+	httpServer  *http.Server // Add HTTP server instance for graceful shutdown
+	zkConn      *zk.Conn     // Add ZooKeeper connection
+	zkManager   *ZKManager   // Add ZKManager instance for ZooKeeper operations
+	activeNodes map[string]string
+	mu          sync.RWMutex // Mutex to protect activeNodes
 }
 
 // WALConfig is configuration for the WAL replication server.
@@ -62,10 +65,12 @@ func NewWALReplicationServer(cfg WALConfig) (*WALReplicationServer, error) {
 	logger.Printf("Pebble DB opened successfully at %s", cfg.DataDir)
 
 	server := &WALReplicationServer{
-		config: cfg,
-		logger: logger,
-		db:     db,  // Assign the opened DB
-		zkConn: nil, // Initialize zkConn to nil
+		config:      cfg,
+		logger:      logger,
+		db:          db,                      // Assign the opened DB
+		zkConn:      nil,                     // Initialize zkConn to nil
+		activeNodes: make(map[string]string), // Initialize the activeNodes map
+		mu:          sync.RWMutex{},          // Initialize the mutex
 	}
 
 	// Connect to ZooKeeper
@@ -502,8 +507,23 @@ func (wrs *WALReplicationServer) handleZkEvents(initialEventChan <-chan zk.Event
 					wrs.logger.Printf("Re-set watch on %s. Current children: %v", event.Path, children)
 					// Successfully re-set the watch, switch to the new event channel.
 					currentEventChan = newEventChan
-					// TODO: Implement logic to update the internal list of active nodes based on `children`.
+					// Implement logic to update the internal list of active nodes based on `children`.
 					// This list is crucial for replication/failover logic.
+					wrs.mu.Lock()
+					wrs.activeNodes = make(map[string]string) // Clear existing nodes
+					for _, nodeID := range children {
+						nodePath := fmt.Sprintf("%s/%s", event.Path, nodeID)
+						data, _, err := wrs.zkConn.Get(nodePath)
+						if err != nil {
+							wrs.logger.Printf("ERROR: Failed to get data for ZK node %s: %v", nodePath, err)
+							continue
+						}
+						internalBindAddress := string(data)
+						wrs.activeNodes[nodeID] = internalBindAddress
+						wrs.logger.Printf("Active node discovered: %s -> %s", nodeID, internalBindAddress)
+					}
+					wrs.logger.Printf("Updated active nodes list. Total active nodes: %d", len(wrs.activeNodes))
+					wrs.mu.Unlock()
 				}
 			default:
 				wrs.logger.Printf("Received unhandled ZooKeeper event type: %s (Type: %d, Path: %s, Err: %v)", event.Type.String(), event.Type, event.Path, event.Err)
