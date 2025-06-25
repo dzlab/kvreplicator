@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble"
-	"github.com/go-zookeeper/zk" // Import ZooKeeper client
+	// Import ZooKeeper client
 )
 
 // WALReplicationServer provides a server for a key-value store using a local PebbleDB instance.
@@ -22,7 +22,6 @@ type WALReplicationServer struct {
 	logger      *log.Logger
 	db          *pebble.DB   // Add PebbleDB instance
 	httpServer  *http.Server // Add HTTP server instance for graceful shutdown
-	zkConn      *zk.Conn     // Add ZooKeeper connection
 	zkManager   *ZKManager   // Add ZKManager instance for ZooKeeper operations
 	activeNodes map[string]string
 	mu          sync.RWMutex // Mutex to protect activeNodes
@@ -68,46 +67,15 @@ func NewWALReplicationServer(cfg WALConfig) (*WALReplicationServer, error) {
 		config:      cfg,
 		logger:      logger,
 		db:          db,                      // Assign the opened DB
-		zkConn:      nil,                     // Initialize zkConn to nil
 		activeNodes: make(map[string]string), // Initialize the activeNodes map
 		mu:          sync.RWMutex{},          // Initialize the mutex
 	}
 
-	// Connect to ZooKeeper
-	if len(cfg.ZkServers) == 0 {
-		logger.Println("WARNING: No ZooKeeper servers specified in config. Membership features will not work.")
-	} else {
-		logger.Printf("Connecting to ZooKeeper at %v...", cfg.ZkServers)
-		conn, _, err := zk.Connect(cfg.ZkServers, time.Second*10) // 10-second timeout for connection
-		if err != nil {
-			// Close DB if ZK connection fails, to clean up
-			db.Close()
-			logger.Printf("ERROR: Failed to connect to ZooKeeper: %v", err)
-			return nil, fmt.Errorf("failed to connect to zookeeper: %w", err)
-		}
-		logger.Println("ZooKeeper connection established.")
-		// Basic check: ensure root path exists
-		exists, _, err := conn.Exists("/kvreplicator/wal")
-		if err != nil {
-			conn.Close()
-			db.Close()
-			logger.Printf("ERROR: Failed to check existence of ZK path /kvreplicator/wal: %v", err)
-			return nil, fmt.Errorf("zookeeper path check failed: %w", err)
-		}
-		if !exists {
-			logger.Println("ZK path /kvreplicator/wal does not exist, creating...")
-			_, err = conn.Create("/kvreplicator/wal", nil, 0, zk.WorldACL(zk.PermAll))
-			if err != nil && err != zk.ErrNodeExists { // ErrNodeExists is ok
-				conn.Close()
-				db.Close()
-				logger.Printf("ERROR: Failed to create ZK path /kvreplicator/wal: %v", err)
-				return nil, fmt.Errorf("failed to create zookeeper path: %w", err)
-			}
-			logger.Println("ZK path /kvreplicator/wal created or already exists.")
-		}
-		// Assign the successful ZK connection to the server instance
-		server.zkConn = conn
-		server.zkManager = NewZKManager(conn, logger, cfg.NodeID) // Initialize ZKManager
+	// Initialize ZKManager and connect
+	server.zkManager = NewZKManager(logger, cfg.NodeID) // Initialize ZKManager without connection
+	if err := server.zkManager.Connect(cfg.ZkServers); err != nil {
+		db.Close() // Ensure DB is closed if ZK connection fails
+		return nil, err
 	}
 
 	logger.Println("WALReplicationServer instance created successfully.")
@@ -124,21 +92,11 @@ func (wrs *WALReplicationServer) Start() error {
 	wrs.logger.Println("Placeholder WAL internal components started.")
 	// --- End Placeholder Start Logic ---
 
-	// Register node in ZooKeeper and set up watches
+	// Start ZKManager, which handles node registration and sets up event watches
 	if wrs.zkManager != nil {
-		err := wrs.zkManager.RegisterNode(wrs.config.InternalBindAddress)
-		if err != nil {
-			wrs.logger.Printf("Error during ZK node registration: %v", err)
+		if err := wrs.zkManager.Start(wrs.config.InternalBindAddress); err != nil {
+			wrs.logger.Printf("Error starting ZKManager: %v", err)
 			// Decide if startup should fail here or continue with a warning
-		}
-
-		eventChan, err := wrs.zkManager.EnsureNodesPathExists()
-		if err != nil {
-			wrs.logger.Printf("Error ensuring ZK nodes path exists or setting watch: %v", err)
-			// Decide if startup should fail here or continue with a warning
-		} else if eventChan != nil {
-			// Start goroutine to handle ZooKeeper events
-			go wrs.handleZkEvents(eventChan) // Pass the event channel to a new handler function
 		}
 	}
 
@@ -187,12 +145,9 @@ func (wrs *WALReplicationServer) Shutdown() error {
 		wrs.httpServer = nil
 	}
 
-	// Close ZooKeeper connection
-	if wrs.zkConn != nil {
-		wrs.logger.Println("Closing ZooKeeper connection...")
-		wrs.zkConn.Close()
-		wrs.logger.Println("ZooKeeper connection closed.")
-		wrs.zkConn = nil
+	// Close ZooKeeper connection via ZKManager
+	if wrs.zkManager != nil {
+		wrs.zkManager.Close()
 	}
 
 	// --- Placeholder Shutdown Logic ---
@@ -444,90 +399,4 @@ func (wrs *WALReplicationServer) setupWALHTTPServerMux() *http.ServeMux {
 	mux.HandleFunc("/wal/stats", wrs.handleWALStats)
 
 	return mux
-}
-
-// handleZkEvents processes events received from the ZooKeeper event channel.
-// This function is intended to run in a separate goroutine.
-func (wrs *WALReplicationServer) handleZkEvents(initialEventChan <-chan zk.Event) {
-	wrs.logger.Println("Starting ZooKeeper event handler goroutine.")
-
-	// Use a variable to hold the current event channel
-	currentEventChan := initialEventChan
-
-	for {
-		select {
-		case event, ok := <-currentEventChan:
-			if !ok {
-				wrs.logger.Println("ZooKeeper event channel closed. Stopping event handler.")
-				return // Exit the goroutine if the channel is closed
-			}
-			wrs.logger.Printf("Received ZK event: %+v", event)
-			switch event.Type {
-			case zk.EventSession:
-				// Handle session state changes (e.g., connected, disconnected, expired)
-				wrs.logger.Printf("ZooKeeper session event: State -> %s, Server -> %s", event.State.String(), event.Server)
-				// TODO: Implement logic for session state changes (e.g., re-register ephemeral node if session expires)
-				if event.State == zk.StateExpired || event.State == zk.StateDisconnected {
-					// A disconnected or expired session means we've lost our ephemeral node registration.
-					// Depending on the desired behavior, we might try to re-connect or rely on Start() to handle this.
-					// For now, we'll just log it as a critical event.
-					wrs.logger.Println("ZooKeeper session expired or disconnected. Node registration might be lost.")
-				}
-			case zk.EventNodeCreated:
-				wrs.logger.Printf("ZooKeeper node created: Path -> %s", event.Path)
-				// TODO: Implement logic for node creation events (e.g., watch data for new nodes)
-				// You might want to set a data watch on the newly created node:
-				// _, _, newEventChan, err := wrs.zkConn.GetW(event.Path)
-				// if err == nil { // Handle error
-				//   // Decide if you need to switch to this new channel or merge events
-				//   // For data watches on many nodes, you'd typically have separate goroutines or fan-in channels
-				// }
-			case zk.EventNodeDeleted:
-				wrs.logger.Printf("ZooKeeper node deleted: Path -> %s", event.Path)
-				// TODO: Implement logic for node deletion events (e.g., remove from list of active nodes)
-			case zk.EventNodeDataChanged:
-				wrs.logger.Printf("ZooKeeper node data changed: Path -> %s", event.Path)
-				// TODO: Implement logic for node data changes (e.g., primary node data)
-				// If this is a data change on the primary election path, we might need to re-evaluate primary status.
-				// After processing, you might need to re-set the data watch on the path:
-				// _, _, newEventChan, err := wrs.zkConn.GetW(event.Path)
-				// if err == nil { // Handle error
-				//   // Decide if you need to switch to this new channel or merge events
-				// }
-			case zk.EventNodeChildrenChanged:
-				wrs.logger.Printf("ZooKeeper node children changed: Path -> %s", event.Path)
-				// This happens when nodes are added/removed under the watched path (/kvreplicator/wal/nodes)
-				// We need to re-get the children and set a new watch on the *same* path.
-				children, _, newEventChan, err := wrs.zkConn.ChildrenW(event.Path)
-				if err != nil {
-					wrs.logger.Printf("ERROR: Failed to re-set watch or get children for path %s after children changed event: %v", event.Path, err)
-					// Depending on error handling, you might want to stop the goroutine or try again.
-					// For now, we log the error and continue trying to read from the old channel.
-				} else {
-					wrs.logger.Printf("Re-set watch on %s. Current children: %v", event.Path, children)
-					// Successfully re-set the watch, switch to the new event channel.
-					currentEventChan = newEventChan
-					// Implement logic to update the internal list of active nodes based on `children`.
-					// This list is crucial for replication/failover logic.
-					wrs.mu.Lock()
-					wrs.activeNodes = make(map[string]string) // Clear existing nodes
-					for _, nodeID := range children {
-						nodePath := fmt.Sprintf("%s/%s", event.Path, nodeID)
-						data, _, err := wrs.zkConn.Get(nodePath)
-						if err != nil {
-							wrs.logger.Printf("ERROR: Failed to get data for ZK node %s: %v", nodePath, err)
-							continue
-						}
-						internalBindAddress := string(data)
-						wrs.activeNodes[nodeID] = internalBindAddress
-						wrs.logger.Printf("Active node discovered: %s -> %s", nodeID, internalBindAddress)
-					}
-					wrs.logger.Printf("Updated active nodes list. Total active nodes: %d", len(wrs.activeNodes))
-					wrs.mu.Unlock()
-				}
-			default:
-				wrs.logger.Printf("Received unhandled ZooKeeper event type: %s (Type: %d, Path: %s, Err: %v)", event.Type.String(), event.Type, event.Path, event.Err)
-			}
-		}
-	}
 }
