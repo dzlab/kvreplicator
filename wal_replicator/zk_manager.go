@@ -12,11 +12,12 @@ import (
 
 // ZKManager handles ZooKeeper operations for WALReplicationServer.
 type ZKManager struct {
-	conn        *zk.Conn
-	logger      *log.Logger
-	nodeID      string
-	activeNodes map[string]string // Map of nodeID to internalBindAddress
-	mu          sync.RWMutex      // Mutex to protect activeNodes
+	conn                *zk.Conn
+	logger              *log.Logger
+	nodeID              string
+	internalBindAddress string            // Store internal bind address for re-registration
+	activeNodes         map[string]string // Map of nodeID to internalBindAddress
+	mu                  sync.RWMutex      // Mutex to protect activeNodes
 }
 
 // NewZKManager creates a new ZKManager instance.
@@ -75,7 +76,10 @@ func (zkm *ZKManager) Start(internalBindAddress string) error {
 		return nil
 	}
 
-	err := zkm.RegisterNode(internalBindAddress)
+	// Store the internal bind address for potential re-registration
+	zkm.internalBindAddress = internalBindAddress
+
+	err := zkm.RegisterNode()
 	if err != nil {
 		zkm.logger.Printf("Error during ZK node registration: %v", err)
 		return err // Or decide if it's a fatal error
@@ -131,8 +135,14 @@ func (zkm *ZKManager) handleZkEvents(initialEventChan <-chan zk.Event) {
 			case zk.EventSession:
 				zkm.logger.Printf("ZooKeeper session event: State -> %s, Server -> %s", event.State.String(), event.Server)
 				if event.State == zk.StateExpired || event.State == zk.StateDisconnected {
-					zkm.logger.Println("ZooKeeper session expired or disconnected. Node registration might be lost.")
-					// TODO: Implement logic for re-registering ephemeral node if session expires
+					zkm.logger.Println("ZooKeeper session expired or disconnected. Attempting to re-register node...")
+					// Attempt to re-register the ephemeral node
+					regErr := zkm.RegisterNode()
+					if regErr != nil {
+						zkm.logger.Printf("ERROR: Failed to re-register ephemeral ZK node after session event: %v", regErr)
+					} else {
+						zkm.logger.Println("Successfully re-registered ephemeral ZK node.")
+					}
 				}
 			case zk.EventNodeCreated:
 				zkm.logger.Printf("ZooKeeper node created: Path -> %s", event.Path)
@@ -175,7 +185,11 @@ func (zkm *ZKManager) handleZkEvents(initialEventChan <-chan zk.Event) {
 }
 
 // RegisterNode registers the current server as an ephemeral node in ZooKeeper.
-func (zkm *ZKManager) RegisterNode(internalBindAddress string) error {
+func (zkm *ZKManager) RegisterNode() error {
+	if zkm.internalBindAddress == "" {
+		zkm.logger.Println("WARNING: internalBindAddress not set, cannot re-register node.")
+		return fmt.Errorf("internalBindAddress not set, cannot re-register node.")
+	}
 	if zkm.conn == nil {
 		zkm.logger.Println("Skipping ZooKeeper node registration: ZK connection is nil.")
 		return nil
@@ -184,7 +198,7 @@ func (zkm *ZKManager) RegisterNode(internalBindAddress string) error {
 	nodePath := fmt.Sprintf("/kvreplicator/wal/nodes/%s", zkm.nodeID)
 	zkm.logger.Printf("Registering node in ZooKeeper at %s...", nodePath)
 
-	_, err := zkm.conn.Create(nodePath, []byte(internalBindAddress), zk.FlagEphemeral, zk.WorldACL(zk.PermAll))
+	_, err := zkm.conn.Create(nodePath, []byte(zkm.internalBindAddress), zk.FlagEphemeral, zk.WorldACL(zk.PermAll))
 	if err != nil {
 		if err == zk.ErrNodeExists {
 			zkm.logger.Printf("WARNING: Ephemeral ZK node %s already exists. This might indicate an unclean shutdown or a duplicate node ID.", nodePath)
