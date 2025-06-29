@@ -462,12 +462,13 @@ func TestWALReplicationServer_HTTP_PlaceholderEndpoints(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusNotImplemented {
-			t.Errorf("Expected status %d, got %d", http.StatusNotImplemented, resp.StatusCode)
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("Expected status %d, got %d", http.StatusOK, resp.StatusCode)
 		}
 		body, _ := ioutil.ReadAll(resp.Body)
-		if !strings.Contains(string(body), "AddNode operation not implemented") {
-			t.Errorf("Expected error message containing 'AddNode operation not implemented', got '%s'", string(body))
+		expectedBody := "Node new-node (127.0.0.1:8082) added successfully to active list."
+		if !strings.Contains(string(body), expectedBody) {
+			t.Errorf("Expected body to contain '%s', got '%s'", expectedBody, string(body))
 		}
 	})
 
@@ -480,12 +481,13 @@ func TestWALReplicationServer_HTTP_PlaceholderEndpoints(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusNotImplemented {
-			t.Errorf("Expected status %d, got %d", http.StatusNotImplemented, resp.StatusCode)
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("Expected status %d, got %d", http.StatusOK, resp.StatusCode)
 		}
 		body, _ := ioutil.ReadAll(resp.Body)
-		if !strings.Contains(string(body), "RemoveNode operation not implemented") {
-			t.Errorf("Expected error message containing 'RemoveNode operation not implemented', got '%s'", string(body))
+		expectedBody := "Node old-node removed successfully from active list."
+		if !strings.Contains(string(body), expectedBody) {
+			t.Errorf("Expected body to contain '%s', got '%s'", expectedBody, string(body))
 		}
 	})
 
