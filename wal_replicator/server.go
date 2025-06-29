@@ -245,18 +245,30 @@ func (wrs *WALReplicationServer) Delete(key string) error {
 	return nil
 }
 
-// Placeholder method for AddNode (WAL equivalent of AddVoter/AddLearner)
+// AddNode adds a node to the server's list of active nodes.
+// This is used for explicit or administrative control over cluster membership.
 func (wrs *WALReplicationServer) AddNode(nodeID string, nodeAddr string) error {
-	wrs.logger.Printf("Received placeholder AddNode request: ID=%s, Address=%s", nodeID, nodeAddr)
-	// In a real implementation, this would add the node to a configuration/membership list
-	return fmt.Errorf("AddNode operation not implemented for WAL replicator yet")
+	wrs.mu.Lock()
+	defer wrs.mu.Unlock()
+
+	wrs.activeNodes[nodeID] = nodeAddr
+	wrs.logger.Printf("Node added to active list: ID=%s, Address=%s. Current active nodes: %v", nodeID, nodeAddr, wrs.activeNodes)
+	return nil
 }
 
-// Placeholder method for RemoveNode
+// RemoveNode removes a node from the server's list of active nodes.
+// This is used for explicit or administrative control over cluster membership.
 func (wrs *WALReplicationServer) RemoveNode(nodeID string) error {
-	wrs.logger.Printf("Received placeholder RemoveNode request: ID=%s", nodeID)
-	// In a real implementation, this would remove the node from the membership list
-	return fmt.Errorf("RemoveNode operation not implemented for WAL replicator yet")
+	wrs.mu.Lock()
+	defer wrs.mu.Unlock()
+
+	if _, exists := wrs.activeNodes[nodeID]; exists {
+		delete(wrs.activeNodes, nodeID)
+		wrs.logger.Printf("Node removed from active list: ID=%s. Current active nodes: %v", nodeID, wrs.activeNodes)
+	} else {
+		wrs.logger.Printf("Attempted to remove non-existent node: ID=%s", nodeID)
+	}
+	return nil
 }
 
 // Placeholder method for IsPrimary/IsReplica
@@ -346,9 +358,12 @@ func (wrs *WALReplicationServer) handleWALJoin(w http.ResponseWriter, r *http.Re
 		http.Error(w, "nodeId and address parameters are required", http.StatusBadRequest)
 		return
 	}
-	// Call placeholder AddNode
-	err := wrs.AddNode(nodeID, nodeAddr) // This will return the "not implemented" error
-	http.Error(w, fmt.Sprintf("Placeholder AddNode failed: %v", err), http.StatusNotImplemented)
+	err := wrs.AddNode(nodeID, nodeAddr)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to add node: %v", err), http.StatusInternalServerError)
+		return
+	}
+	fmt.Fprintf(w, "Node %s (%s) added successfully to active list.", nodeID, nodeAddr)
 }
 
 // handleWALRemove is the HTTP handler for /wal/remove requests (Placeholder).
@@ -362,9 +377,12 @@ func (wrs *WALReplicationServer) handleWALRemove(w http.ResponseWriter, r *http.
 		http.Error(w, "nodeId parameter is required", http.StatusBadRequest)
 		return
 	}
-	// Call placeholder RemoveNode
-	err := wrs.RemoveNode(nodeID) // This will return the "not implemented" error
-	http.Error(w, fmt.Sprintf("Placeholder RemoveNode failed: %v", err), http.StatusNotImplemented)
+	err := wrs.RemoveNode(nodeID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to remove node: %v", err), http.StatusInternalServerError)
+		return
+	}
+	fmt.Fprintf(w, "Node %s removed successfully from active list.", nodeID)
 }
 
 // handleWALPrimary is the HTTP handler for /wal/primary requests (Placeholder).
