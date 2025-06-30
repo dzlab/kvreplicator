@@ -503,8 +503,11 @@ func TestWALReplicationServer_HTTP_PlaceholderEndpoints(t *testing.T) {
 			t.Errorf("Expected status %d, got %d", http.StatusOK, resp.StatusCode)
 		}
 		body, _ := ioutil.ReadAll(resp.Body)
-		if !strings.Contains(string(body), "Placeholder Primary address") || !strings.Contains(string(body), "Is this node primary: false") {
-			t.Errorf("Expected placeholder response, got '%s'", string(body))
+		expectedPrimaryStatus := fmt.Sprintf("Is this node primary: true\n")
+		expectedPrimaryAddress := fmt.Sprintf("Current Primary address: %s\n", server.config.InternalBindAddress)
+
+		if !strings.Contains(string(body), expectedPrimaryStatus) || !strings.Contains(string(body), expectedPrimaryAddress) {
+			t.Errorf("Expected primary response to contain \"%s\" and \"%s\", got \"%s\"", expectedPrimaryStatus, expectedPrimaryAddress, string(body))
 		}
 	})
 

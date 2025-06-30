@@ -87,21 +87,16 @@ func NewWALReplicationServer(cfg WALConfig) (*WALReplicationServer, error) {
 func (wrs *WALReplicationServer) Start() error {
 	wrs.logger.Printf("WALReplicationServer node %s starting...", wrs.config.NodeID)
 
-	// --- Placeholder Start Logic ---
-	// Simulate starting internal WAL components (None implemented yet)
-	wrs.logger.Println("Placeholder WAL internal components started.")
-	// --- End Placeholder Start Logic ---
-
-	// Start ZKManager, which handles node registration and sets up event watches
+	// Start ZKManager, which handles node registration, primary election, and sets up event watches
 	if wrs.zkManager != nil {
 		if err := wrs.zkManager.Start(wrs.config.InternalBindAddress); err != nil {
 			wrs.logger.Printf("Error starting ZKManager: %v", err)
-			// Decide if startup should fail here or continue with a warning
+			return err // Fail if ZKManager cannot start properly
 		}
 	}
 
 	wrs.logger.Printf("WALReplicationServer node %s started successfully.", wrs.config.NodeID)
-	wrs.logger.Printf("Internal address (placeholder): %s", wrs.config.InternalBindAddress)
+	wrs.logger.Printf("Internal address: %s", wrs.config.InternalBindAddress)
 	wrs.logger.Printf("HTTP API listening on: %s", wrs.config.HTTPAddr)
 
 	// Setup HTTP server for API
@@ -117,9 +112,9 @@ func (wrs *WALReplicationServer) Start() error {
 	}
 
 	go func() {
-		wrs.logger.Printf("Placeholder WAL HTTP server listening on %s", wrs.config.HTTPAddr)
+		wrs.logger.Printf("WAL HTTP server listening on %s", wrs.config.HTTPAddr)
 		if err := wrs.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			wrs.logger.Fatalf("Placeholder WAL HTTP server ListenAndServe: %v", err)
+			wrs.logger.Fatalf("WAL HTTP server ListenAndServe: %v", err)
 		}
 	}()
 
@@ -271,18 +266,32 @@ func (wrs *WALReplicationServer) RemoveNode(nodeID string) error {
 	return nil
 }
 
-// Placeholder method for IsPrimary/IsReplica
+// IsPrimary checks if this node is currently the primary in the cluster.
 func (wrs *WALReplicationServer) IsPrimary() bool {
-	// In a real implementation, this would return true if this node is the primary
-	wrs.logger.Println("Received placeholder IsPrimary request.")
-	return false // Placeholder: Assume not primary
+	if wrs.zkManager == nil {
+		wrs.logger.Println("ZKManager not initialized, cannot determine primary status.")
+		return false
+	}
+	isPrimary, _, err := wrs.zkManager.GetPrimaryInfo()
+	if err != nil {
+		wrs.logger.Printf("ERROR: Failed to get primary info from ZK: %v", err)
+		return false
+	}
+	return isPrimary
 }
 
-// Placeholder method for GetPrimary
+// GetPrimary returns the address of the current primary node.
 func (wrs *WALReplicationServer) GetPrimary() string {
-	// In a real implementation, this would return the primary's address
-	wrs.logger.Println("Received placeholder GetPrimary request.")
-	return "placeholder-primary-address:xxxx (WAL replication not implemented)"
+	if wrs.zkManager == nil {
+		wrs.logger.Println("ZKManager not initialized, cannot determine primary address.")
+		return "unknown (ZKManager not initialized)"
+	}
+	_, primaryAddr, err := wrs.zkManager.GetPrimaryInfo()
+	if err != nil {
+		wrs.logger.Printf("ERROR: Failed to get primary info from ZK: %v", err)
+		return "unknown (error fetching primary address)"
+	}
+	return primaryAddr
 }
 
 // Placeholder method for GetStats
@@ -387,9 +396,10 @@ func (wrs *WALReplicationServer) handleWALRemove(w http.ResponseWriter, r *http.
 
 // handleWALPrimary is the HTTP handler for /wal/primary requests (Placeholder).
 func (wrs *WALReplicationServer) handleWALPrimary(w http.ResponseWriter, r *http.Request) {
-	primary := wrs.GetPrimary() // Calls placeholder
-	fmt.Fprintf(w, "Placeholder Primary address: %s\n", primary)
-	fmt.Fprintf(w, "Placeholder: Is this node primary: %t (WAL replication not implemented)\n", wrs.IsPrimary()) // Calls placeholder
+	isPrimary := wrs.IsPrimary()
+	primaryAddr := wrs.GetPrimary()
+	fmt.Fprintf(w, "Is this node primary: %t\n", isPrimary)
+	fmt.Fprintf(w, "Current Primary address: %s\n", primaryAddr)
 }
 
 // handleWALStats is the HTTP handler for /wal/stats requests (Placeholder).
