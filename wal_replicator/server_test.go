@@ -31,6 +31,7 @@ func newTestWALServer(t *testing.T, dataDir string) (*WALReplicationServer, erro
 		InternalBindAddress: "127.0.0.1:0", // Use :0 for a random available port
 		HTTPAddr:            ":0",          // Use :0 to get a random available port
 		DataDir:             dataDir,       // Use the dataDir parameter
+		// ZkServers is intentionally omitted to test behavior without a ZK connection
 	}
 	return NewWALReplicationServer(cfg)
 }
@@ -50,6 +51,9 @@ func TestNewWALReplicationServer(t *testing.T) {
 		if server.db == nil {
 			t.Error("Expected Pebble DB to be initialized, got nil")
 		}
+		if server.zkManager == nil {
+			t.Error("Expected ZKManager to be initialized, got nil")
+		}
 
 		// Check if the directory was created
 		if _, err := os.Stat(dataDir); os.IsNotExist(err) {
@@ -63,7 +67,12 @@ func TestNewWALReplicationServer(t *testing.T) {
 	})
 
 	t.Run("error with empty DataDir", func(t *testing.T) {
-		server, err := newTestWALServer(t, "")
+		// Create a config with an empty DataDir
+		cfg := WALConfig{
+			NodeID:  "test-node",
+			DataDir: "",
+		}
+		server, err := NewWALReplicationServer(cfg)
 		if err == nil {
 			t.Fatal("Expected error for empty DataDir, got nil")
 		}
@@ -220,8 +229,6 @@ func TestWALReplicationServer_HTTP_KV(t *testing.T) {
 
 	// Setup the HTTP handler directly for testing by getting the mux from the server instance
 	mux := server.setupWALHTTPServerMux()
-	// We need a way to access the handlers defined within setupWALHTTPServerMux.
-	// The current setup in server.go returns the mux, so we can use that directly.
 
 	// Use httptest to create a test server
 	ts := httptest.NewServer(mux)
@@ -435,8 +442,8 @@ func TestWALReplicationServer_HTTP_KV(t *testing.T) {
 	})
 }
 
-// Add tests for placeholder endpoints if desired, though they just return errors/placeholders
-func TestWALReplicationServer_HTTP_PlaceholderEndpoints(t *testing.T) {
+// TestWALReplicationServer_HTTP_StatusEndpoints tests the status endpoints like /wal/primary and /wal/stats.
+func TestWALReplicationServer_HTTP_StatusEndpoints(t *testing.T) {
 	dataDir := newTempDir(t)
 	defer cleanupDir(dataDir)
 
@@ -446,52 +453,13 @@ func TestWALReplicationServer_HTTP_PlaceholderEndpoints(t *testing.T) {
 	}
 	defer server.Close()
 
-	// Setup the HTTP handler directly for testing by getting the mux from the server instance
+	// Setup the HTTP handler directly for testing
 	mux := server.setupWALHTTPServerMux()
-	// The mux returned by setupWALHTTPServerMux is used directly now, no need to manually recreate or register.
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 	client := ts.Client()
 
-	t.Run("HTTP /wal/join (Placeholder)", func(t *testing.T) {
-		url := fmt.Sprintf("%s/wal/join?nodeId=new-node&address=127.0.0.1:8082", ts.URL)
-		req, _ := http.NewRequest(http.MethodPost, url, nil)
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("Failed to send POST request: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("Expected status %d, got %d", http.StatusOK, resp.StatusCode)
-		}
-		body, _ := ioutil.ReadAll(resp.Body)
-		expectedBody := "Node new-node (127.0.0.1:8082) added successfully to active list."
-		if !strings.Contains(string(body), expectedBody) {
-			t.Errorf("Expected body to contain '%s', got '%s'", expectedBody, string(body))
-		}
-	})
-
-	t.Run("HTTP /wal/remove (Placeholder)", func(t *testing.T) {
-		url := fmt.Sprintf("%s/wal/remove?nodeId=old-node", ts.URL)
-		req, _ := http.NewRequest(http.MethodPost, url, nil)
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("Failed to send POST request: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("Expected status %d, got %d", http.StatusOK, resp.StatusCode)
-		}
-		body, _ := ioutil.ReadAll(resp.Body)
-		expectedBody := "Node old-node removed successfully from active list."
-		if !strings.Contains(string(body), expectedBody) {
-			t.Errorf("Expected body to contain '%s', got '%s'", expectedBody, string(body))
-		}
-	})
-
-	t.Run("HTTP /wal/primary (Placeholder)", func(t *testing.T) {
+	t.Run("HTTP /wal/primary", func(t *testing.T) {
 		url := fmt.Sprintf("%s/wal/primary", ts.URL)
 		resp, err := client.Get(url)
 		if err != nil {
@@ -503,6 +471,7 @@ func TestWALReplicationServer_HTTP_PlaceholderEndpoints(t *testing.T) {
 			t.Errorf("Expected status %d, got %d", http.StatusOK, resp.StatusCode)
 		}
 		body, _ := ioutil.ReadAll(resp.Body)
+		// Since no ZK is configured, it should report not being primary and an error fetching the address.
 		expectedPrimaryStatus := "Is this node primary: false\n"
 		expectedPrimaryAddress := "Current Primary address: unknown (error fetching primary address)\n"
 
@@ -511,7 +480,7 @@ func TestWALReplicationServer_HTTP_PlaceholderEndpoints(t *testing.T) {
 		}
 	})
 
-	t.Run("HTTP /wal/stats (Placeholder)", func(t *testing.T) {
+	t.Run("HTTP /wal/stats", func(t *testing.T) {
 		url := fmt.Sprintf("%s/wal/stats", ts.URL)
 		resp, err := client.Get(url)
 		if err != nil {
@@ -523,6 +492,7 @@ func TestWALReplicationServer_HTTP_PlaceholderEndpoints(t *testing.T) {
 			t.Errorf("Expected status %d, got %d", http.StatusOK, resp.StatusCode)
 		}
 		body, _ := ioutil.ReadAll(resp.Body)
+		// Check for all the expected placeholder stats fields
 		if !strings.Contains(string(body), "status: placeholder - WAL replication not implemented") ||
 			!strings.Contains(string(body), "replication_status: not implemented") ||
 			!strings.Contains(string(body), "node_id: test-node") || // Matches config in newTestWALServer

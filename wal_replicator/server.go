@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -16,15 +15,13 @@ import (
 
 // WALReplicationServer provides a server for a key-value store using a local PebbleDB instance.
 // Note: This implementation currently acts as a local key-value store and does NOT include
-// Write-Ahead Logging (WAL) or replication logic. The membership/status endpoints are placeholders.
+// Write-Ahead Logging (WAL) or replication logic. Cluster membership is managed by ZooKeeper.
 type WALReplicationServer struct {
-	config      WALConfig
-	logger      *log.Logger
-	db          *pebble.DB   // Add PebbleDB instance
-	httpServer  *http.Server // Add HTTP server instance for graceful shutdown
-	zkManager   *ZKManager   // Add ZKManager instance for ZooKeeper operations
-	activeNodes map[string]string
-	mu          sync.RWMutex // Mutex to protect activeNodes
+	config     WALConfig
+	logger     *log.Logger
+	db         *pebble.DB   // Add PebbleDB instance
+	httpServer *http.Server // Add HTTP server instance for graceful shutdown
+	zkManager  *ZKManager   // Add ZKManager instance for ZooKeeper operations
 }
 
 // WALConfig is configuration for the WAL replication server.
@@ -64,11 +61,9 @@ func NewWALReplicationServer(cfg WALConfig) (*WALReplicationServer, error) {
 	logger.Printf("Pebble DB opened successfully at %s", cfg.DataDir)
 
 	server := &WALReplicationServer{
-		config:      cfg,
-		logger:      logger,
-		db:          db,                      // Assign the opened DB
-		activeNodes: make(map[string]string), // Initialize the activeNodes map
-		mu:          sync.RWMutex{},          // Initialize the mutex
+		config: cfg,
+		logger: logger,
+		db:     db, // Assign the opened DB
 	}
 
 	// Initialize ZKManager and connect
@@ -240,32 +235,6 @@ func (wrs *WALReplicationServer) Delete(key string) error {
 	return nil
 }
 
-// AddNode adds a node to the server's list of active nodes.
-// This is used for explicit or administrative control over cluster membership.
-func (wrs *WALReplicationServer) AddNode(nodeID string, nodeAddr string) error {
-	wrs.mu.Lock()
-	defer wrs.mu.Unlock()
-
-	wrs.activeNodes[nodeID] = nodeAddr
-	wrs.logger.Printf("Node added to active list: ID=%s, Address=%s. Current active nodes: %v", nodeID, nodeAddr, wrs.activeNodes)
-	return nil
-}
-
-// RemoveNode removes a node from the server's list of active nodes.
-// This is used for explicit or administrative control over cluster membership.
-func (wrs *WALReplicationServer) RemoveNode(nodeID string) error {
-	wrs.mu.Lock()
-	defer wrs.mu.Unlock()
-
-	if _, exists := wrs.activeNodes[nodeID]; exists {
-		delete(wrs.activeNodes, nodeID)
-		wrs.logger.Printf("Node removed from active list: ID=%s. Current active nodes: %v", nodeID, wrs.activeNodes)
-	} else {
-		wrs.logger.Printf("Attempted to remove non-existent node: ID=%s", nodeID)
-	}
-	return nil
-}
-
 // IsPrimary checks if this node is currently the primary in the cluster.
 func (wrs *WALReplicationServer) IsPrimary() bool {
 	if wrs.zkManager == nil {
@@ -355,46 +324,7 @@ func (wrs *WALReplicationServer) handleKV(w http.ResponseWriter, r *http.Request
 	}
 }
 
-// handleWALJoin is the HTTP handler for /wal/join requests (Placeholder).
-func (wrs *WALReplicationServer) handleWALJoin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST only", http.StatusMethodNotAllowed)
-		return
-	}
-	nodeID := r.URL.Query().Get("nodeId")
-	nodeAddr := r.URL.Query().Get("address")
-	if nodeID == "" || nodeAddr == "" {
-		http.Error(w, "nodeId and address parameters are required", http.StatusBadRequest)
-		return
-	}
-	err := wrs.AddNode(nodeID, nodeAddr)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to add node: %v", err), http.StatusInternalServerError)
-		return
-	}
-	fmt.Fprintf(w, "Node %s (%s) added successfully to active list.", nodeID, nodeAddr)
-}
-
-// handleWALRemove is the HTTP handler for /wal/remove requests (Placeholder).
-func (wrs *WALReplicationServer) handleWALRemove(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST only", http.StatusMethodNotAllowed)
-		return
-	}
-	nodeID := r.URL.Query().Get("nodeId")
-	if nodeID == "" {
-		http.Error(w, "nodeId parameter is required", http.StatusBadRequest)
-		return
-	}
-	err := wrs.RemoveNode(nodeID)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to remove node: %v", err), http.StatusInternalServerError)
-		return
-	}
-	fmt.Fprintf(w, "Node %s removed successfully from active list.", nodeID)
-}
-
-// handleWALPrimary is the HTTP handler for /wal/primary requests (Placeholder).
+// handleWALPrimary is the HTTP handler for /wal/primary requests.
 func (wrs *WALReplicationServer) handleWALPrimary(w http.ResponseWriter, r *http.Request) {
 	isPrimary := wrs.IsPrimary()
 	primaryAddr := wrs.GetPrimary()
@@ -402,7 +332,7 @@ func (wrs *WALReplicationServer) handleWALPrimary(w http.ResponseWriter, r *http
 	fmt.Fprintf(w, "Current Primary address: %s\n", primaryAddr)
 }
 
-// handleWALStats is the HTTP handler for /wal/stats requests (Placeholder).
+// handleWALStats is the HTTP handler for /wal/stats requests.
 func (wrs *WALReplicationServer) handleWALStats(w http.ResponseWriter, r *http.Request) {
 	stats := wrs.GetStats() // Calls placeholder
 	for k, v := range stats {
@@ -410,7 +340,7 @@ func (wrs *WALReplicationServer) handleWALStats(w http.ResponseWriter, r *http.R
 	}
 }
 
-// setupWALHTTPServerMux sets up the HTTP request multiplexer for the WAL replicator placeholder.
+// setupWALHTTPServerMux sets up the HTTP request multiplexer for the WAL replicator.
 // It registers all the handler functions.
 func (wrs *WALReplicationServer) setupWALHTTPServerMux() *http.ServeMux {
 	mux := http.NewServeMux()
@@ -418,11 +348,7 @@ func (wrs *WALReplicationServer) setupWALHTTPServerMux() *http.ServeMux {
 	// Register KV Endpoints
 	mux.HandleFunc("/kv", wrs.handleKV)
 
-	// Register Membership Endpoints (Placeholder)
-	mux.HandleFunc("/wal/join", wrs.handleWALJoin)
-	mux.HandleFunc("/wal/remove", wrs.handleWALRemove)
-
-	// Register Status Endpoints (Placeholder)
+	// Register Status Endpoints (relying on ZooKeeper for membership)
 	mux.HandleFunc("/wal/primary", wrs.handleWALPrimary)
 	mux.HandleFunc("/wal/stats", wrs.handleWALStats)
 
