@@ -15,9 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/wal"
-	// Import ZooKeeper client
+	"github.com/cockroachdb/pebble/v2"
+	"github.com/cockroachdb/pebble/v2/wal"
 )
 
 // WALReplicationServer provides a server for a key-value store using a local PebbleDB instance.
