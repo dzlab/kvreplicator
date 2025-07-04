@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -299,7 +300,18 @@ func (wrs *WALReplicationServer) GetLatestSequenceNumber() (uint64, error) {
 	// and its sequence number is the latest sequence number at that time.
 	snap := wrs.db.NewSnapshot()
 	defer snap.Close()
-	return snap.SeqNum(), nil
+
+	// Get the reflect.Value of the struct
+	v := reflect.ValueOf(snap).Elem()
+	// Access the unexported (private) field by name
+	f := v.FieldByName("seqNum")
+	if !f.IsValid() {
+		return 0, fmt.Errorf("no such field: seqNum")
+	}
+	// Read the value (note: Can only read, not set)
+	seqNum := f.Uint()
+
+	return seqNum, nil
 }
 
 // GetUpdatesSince scans the WAL files and returns all mutation events since a given sequence number.
