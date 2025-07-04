@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble/v2"
-	"github.com/cockroachdb/pebble/v2/wal"
+	"github.com/cockroachdb/pebble/v2/record"
 )
 
 // WALReplicationServer provides a server for a key-value store using a local PebbleDB instance.
@@ -335,9 +335,9 @@ func (wrs *WALReplicationServer) GetUpdatesSince(sinceSeq uint64) ([]WALUpdate, 
 			continue
 		}
 
-		r := wal.NewReader(f, 0)
+		r := record.NewReader(f, 0)
 		for {
-			rr, err := r.NextRecord()
+			rr, err := r.Next()
 			if err != nil {
 				if err == io.EOF {
 					break
