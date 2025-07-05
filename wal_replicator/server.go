@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"kvreplicator/internal/base"
 	"log"
 	"net/http"
 	"os"
@@ -384,12 +385,14 @@ func (wrs *WALReplicationServer) GetUpdatesSince(sinceSeq uint64) ([]WALUpdate, 
 				if currentSeqNum >= sinceSeq {
 					var op string
 					var value string
+					internalKey := base.DecodeInternalKey(iter.Key())
+					keyString := string(internalKey.UserKey)
 
-					switch iter.Kind() {
-					case pebble.InternalKeyKindSet:
+					switch internalKey.Kind() {
+					case base.InternalKeyKindSet:
 						op = "put"
 						value = string(iter.Value())
-					case pebble.InternalKeyKindDelete:
+					case base.InternalKeyKindDelete:
 						op = "delete"
 					default:
 						// Skip other kinds of operations (e.g., Merge, LogData)
@@ -400,7 +403,7 @@ func (wrs *WALReplicationServer) GetUpdatesSince(sinceSeq uint64) ([]WALUpdate, 
 					updates = append(updates, WALUpdate{
 						SeqNum: currentSeqNum,
 						Op:     op,
-						Key:    string(iter.Key()),
+						Key:    keyString,
 						Value:  value,
 					})
 				}
