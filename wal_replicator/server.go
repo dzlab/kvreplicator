@@ -2,14 +2,23 @@ package wal_replicator
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"io"
+	"kvreplicator/internal/base"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/cockroachdb/pebble/v2/record"
 )
 
 // WALReplicationServer provides a server for a key-value store using a local PebbleDB instance.
@@ -31,6 +40,14 @@ type WALConfig struct {
 	DataDir             string   // Directory for WAL files, DB, etc. (used for PebbleDB path)
 	ZkServers           []string // Addresses of ZooKeeper servers (e.g., ["localhost:2181"])
 	// Other WAL specific configuration parameters
+}
+
+// WALUpdate represents a single operation recorded in the WAL.
+type WALUpdate struct {
+	SeqNum uint64 `json:"seqNum"`
+	Op     string `json:"op"`
+	Key    string `json:"key"`
+	Value  string `json:"value,omitempty"`
 }
 
 // NewWALReplicationServer creates and initializes a new WALReplicationServer instance.
@@ -275,6 +292,131 @@ func (wrs *WALReplicationServer) GetStats() map[string]string {
 }
 
 // --- HTTP Handler Methods ---
+// GetLatestSequenceNumber returns the latest sequence number from PebbleDB.
+func (wrs *WALReplicationServer) GetLatestSequenceNumber() (uint64, error) {
+	if wrs.db == nil {
+		return 0, fmt.Errorf("pebble db is not initialized")
+	}
+	// A snapshot provides a consistent view of the DB at a point in time,
+	// and its sequence number is the latest sequence number at that time.
+	snap := wrs.db.NewSnapshot()
+	defer snap.Close()
+
+	// Get the reflect.Value of the struct
+	v := reflect.ValueOf(snap).Elem()
+	// Access the unexported (private) field by name
+	f := v.FieldByName("seqNum")
+	if !f.IsValid() {
+		return 0, fmt.Errorf("no such field: seqNum")
+	}
+	// Read the value (note: Can only read, not set)
+	seqNum := f.Uint()
+
+	return seqNum, nil
+}
+
+// GetUpdatesSince scans the WAL files and returns all mutation events since a given sequence number.
+func (wrs *WALReplicationServer) GetUpdatesSince(sinceSeq uint64) ([]WALUpdate, error) {
+	if wrs.db == nil {
+		return nil, fmt.Errorf("pebble db is not initialized")
+	}
+
+	walFiles, err := filepath.Glob(filepath.Join(wrs.config.DataDir, "*.log"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to list WAL files: %w", err)
+	}
+	sort.Strings(walFiles)
+
+	var updates []WALUpdate
+
+	for _, walFile := range walFiles {
+		f, err := os.Open(walFile)
+		if err != nil {
+			wrs.logger.Printf("WARNING: could not open WAL file %s: %v", walFile, err)
+			continue
+		}
+
+		r := record.NewReader(f, 0)
+		for {
+			rr, err := r.Next()
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				// It's possible to hit partial records at the end of a file.
+				// We can log this but continue to the next file.
+				wrs.logger.Printf("WARNING: error reading next record from %s: %v", walFile, err)
+				break
+			}
+
+			batchRepr, err := io.ReadAll(rr)
+			if err != nil {
+				wrs.logger.Printf("WARNING: could not read WAL record from %s: %v", walFile, err)
+				continue
+			}
+
+			if len(batchRepr) < 12 { // Header size
+				continue
+			}
+
+			// The batch representation starts with an 8-byte sequence number and 4-byte count.
+			baseSeqNum := binary.LittleEndian.Uint64(batchRepr[:8])
+			count := binary.LittleEndian.Uint32(batchRepr[8:12])
+
+			// If the entire batch is before the sequence number we're interested in, skip it.
+			if baseSeqNum+uint64(count) <= sinceSeq {
+				continue
+			}
+
+			var batch pebble.Batch
+			if err := batch.SetRepr(batchRepr); err != nil {
+				wrs.logger.Printf("WARNING: could not decode batch from WAL file %s: %v", walFile, err)
+				continue
+			}
+
+			iter, err := batch.NewIter(nil)
+			if err != nil {
+				wrs.logger.Printf("WARNING: could not create iterator for batch from WAL file %s: %v", walFile, err)
+				continue
+			}
+
+			currentSeqNum := baseSeqNum
+			for iter.First(); iter.Valid(); iter.Next() {
+				if currentSeqNum >= sinceSeq {
+					var op string
+					var value string
+					internalKey := base.DecodeInternalKey(iter.Key())
+					keyString := string(internalKey.UserKey)
+
+					switch internalKey.Kind() {
+					case base.InternalKeyKindSet:
+						op = "put"
+						value = string(iter.Value())
+					case base.InternalKeyKindDelete:
+						op = "delete"
+					default:
+						// Skip other kinds of operations (e.g., Merge, LogData)
+						currentSeqNum++
+						continue
+					}
+
+					updates = append(updates, WALUpdate{
+						SeqNum: currentSeqNum,
+						Op:     op,
+						Key:    keyString,
+						Value:  value,
+					})
+				}
+				currentSeqNum++
+			}
+			iter.Close()
+		}
+		f.Close() // Close file at the end of processing it.
+	}
+	return updates, nil
+}
+
+// --- HTTP Handler Methods ---
 
 // handleKV is the HTTP handler for /kv requests.
 func (wrs *WALReplicationServer) handleKV(w http.ResponseWriter, r *http.Request) {
@@ -339,6 +481,42 @@ func (wrs *WALReplicationServer) handleWALStats(w http.ResponseWriter, r *http.R
 	}
 }
 
+// handleWALSeqNum is the HTTP handler for /wal/seqnum requests.
+func (wrs *WALReplicationServer) handleWALSeqNum(w http.ResponseWriter, r *http.Request) {
+	seqNum, err := wrs.GetLatestSequenceNumber()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get latest sequence number: %v", err), http.StatusInternalServerError)
+		return
+	}
+	fmt.Fprintf(w, "%d", seqNum)
+}
+
+// handleWALUpdates is the HTTP handler for /wal/updates requests.
+func (wrs *WALReplicationServer) handleWALUpdates(w http.ResponseWriter, r *http.Request) {
+	sinceStr := r.URL.Query().Get("since")
+	if sinceStr == "" {
+		http.Error(w, "query parameter 'since' is required", http.StatusBadRequest)
+		return
+	}
+
+	sinceSeq, err := strconv.ParseUint(sinceStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid 'since' parameter, must be a non-negative integer", http.StatusBadRequest)
+		return
+	}
+
+	updates, err := wrs.GetUpdatesSince(sinceSeq)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get updates from WAL: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(updates); err != nil {
+		wrs.logger.Printf("ERROR: Failed to encode WAL updates to JSON: %v", err)
+	}
+}
+
 // setupWALHTTPServerMux sets up the HTTP request multiplexer for the WAL replicator.
 // It registers all the handler functions.
 func (wrs *WALReplicationServer) setupWALHTTPServerMux() *http.ServeMux {
@@ -350,6 +528,8 @@ func (wrs *WALReplicationServer) setupWALHTTPServerMux() *http.ServeMux {
 	// Register Status Endpoints (relying on ZooKeeper for membership)
 	mux.HandleFunc("/wal/primary", wrs.handleWALPrimary)
 	mux.HandleFunc("/wal/stats", wrs.handleWALStats)
+	mux.HandleFunc("/wal/updates", wrs.handleWALUpdates)
+	mux.HandleFunc("/wal/seqnum", wrs.handleWALSeqNum)
 
 	return mux
 }
