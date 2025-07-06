@@ -2,36 +2,26 @@ package wal_replicator
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
-	"kvreplicator/internal/base"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
-	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/cockroachdb/pebble/v2"
-	"github.com/cockroachdb/pebble/v2/record"
 )
 
 // WALReplicationServer provides a server for a key-value store using a local PebbleDB instance.
-// Note: This implementation currently acts as a local key-value store and does NOT include
-// Write-Ahead Logging (WAL) or replication logic. Cluster membership is managed by ZooKeeper.
 type WALReplicationServer struct {
 	config     WALConfig
 	logger     *log.Logger
-	db         *pebble.DB   // Add PebbleDB instance
-	httpServer *http.Server // Add HTTP server instance for graceful shutdown
-	zkManager  *ZKManager   // Add ZKManager instance for ZooKeeper operations
+	db         *PebbleDBStore // Use the new PebbleDBStore type
+	httpServer *http.Server   // Add HTTP server instance for graceful shutdown
+	zkManager  *ZKManager     // Add ZKManager instance for ZooKeeper operations
 }
 
+// WALConfig holds configuration parameters for the WALReplicationServer.
 // WALConfig is configuration for the WAL replication server.
 type WALConfig struct {
 	NodeID              string
@@ -40,14 +30,6 @@ type WALConfig struct {
 	DataDir             string   // Directory for WAL files, DB, etc. (used for PebbleDB path)
 	ZkServers           []string // Addresses of ZooKeeper servers (e.g., ["localhost:2181"])
 	// Other WAL specific configuration parameters
-}
-
-// WALUpdate represents a single operation recorded in the WAL.
-type WALUpdate struct {
-	SeqNum uint64 `json:"seqNum"`
-	Op     string `json:"op"`
-	Key    string `json:"key"`
-	Value  string `json:"value,omitempty"`
 }
 
 // NewWALReplicationServer creates and initializes a new WALReplicationServer instance.
@@ -61,31 +43,22 @@ func NewWALReplicationServer(cfg WALConfig) (*WALReplicationServer, error) {
 		return nil, fmt.Errorf("WALConfig error: DataDir must be specified")
 	}
 
-	// Ensure data directory exists
-	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
-		logger.Printf("ERROR: Failed to create data directory %s: %v", cfg.DataDir, err)
-		return nil, fmt.Errorf("failed to create data directory: %w", err)
-	}
-
-	// Open PebbleDB
-	opts := &pebble.Options{} // Use default options for now
-	db, err := pebble.Open(cfg.DataDir, opts)
+	// Initialize PebbleDBStore
+	dbStore, err := NewPebbleDBStore(cfg.DataDir, logger)
 	if err != nil {
-		logger.Printf("ERROR: Failed to open Pebble DB at %s: %v", cfg.DataDir, err)
-		return nil, fmt.Errorf("failed to open pebble db: %w", err)
+		return nil, fmt.Errorf("failed to initialize pebble db store: %w", err)
 	}
-	logger.Printf("Pebble DB opened successfully at %s", cfg.DataDir)
 
 	server := &WALReplicationServer{
 		config: cfg,
 		logger: logger,
-		db:     db, // Assign the opened DB
+		db:     dbStore, // Assign the new PebbleDBStore
 	}
 
 	// Initialize ZKManager and connect
 	server.zkManager = NewZKManager(logger, cfg.NodeID) // Initialize ZKManager without connection
 	if err := server.zkManager.Connect(cfg.ZkServers); err != nil {
-		db.Close() // Ensure DB is closed if ZK connection fails
+		dbStore.Close() // Ensure DB is closed if ZK connection fails
 		return nil, err
 	}
 
@@ -191,23 +164,10 @@ func (wrs *WALReplicationServer) Close() error {
 // Get retrieves a value for a given key from the local PebbleDB.
 func (wrs *WALReplicationServer) Get(key string) (string, error) {
 	wrs.logger.Printf("DB Get: key=%s", key) // Using Printf for potentially noisy ops
-	if wrs.db == nil {
-		return "", fmt.Errorf("pebble db is not initialized")
-	}
-
-	valueBytes, closer, err := wrs.db.Get([]byte(key))
+	valueStr, err := wrs.db.Get(key)
 	if err != nil {
-		if err == pebble.ErrNotFound {
-			wrs.logger.Printf("Key not found: %s", key)
-			return "", fmt.Errorf("key not found: %s", key)
-		}
-		wrs.logger.Printf("ERROR: Pebble Get failed for key %s: %v", key, err)
-		return "", fmt.Errorf("pebble get failed for key %s: %w", key, err)
+		return "", err
 	}
-	defer closer.Close()
-
-	// Make a copy of the valueBytes as it's only valid until closer.Close()
-	valueStr := string(valueBytes)
 	wrs.logger.Printf("DB Get successful: key=%s", key)
 	return valueStr, nil
 }
@@ -216,15 +176,9 @@ func (wrs *WALReplicationServer) Get(key string) (string, error) {
 // Note: This operation is NOT replicated to other nodes in this placeholder implementation.
 func (wrs *WALReplicationServer) Put(key, value string) error {
 	wrs.logger.Printf("DB Put: key=%s, value=%s", key, value) // Using Printf for potentially noisy ops
-	if wrs.db == nil {
-		return fmt.Errorf("pebble db is not initialized")
-	}
-
-	writeOpts := pebble.Sync // Ensure data is flushed to disk
-	err := wrs.db.Set([]byte(key), []byte(value), writeOpts)
+	err := wrs.db.Put(key, value)
 	if err != nil {
-		wrs.logger.Printf("ERROR: Pebble Set failed for Key=%s: %v", key, err)
-		return fmt.Errorf("pebble set failed for key %s: %w", key, err)
+		return err
 	}
 	wrs.logger.Printf("Successfully set key %s", key)
 	return nil
@@ -234,20 +188,11 @@ func (wrs *WALReplicationServer) Put(key, value string) error {
 // Note: This operation is NOT replicated to other nodes in this placeholder implementation.
 func (wrs *WALReplicationServer) Delete(key string) error {
 	wrs.logger.Printf("DB Delete: key=%s", key) // Using Printf for potentially noisy ops
-	if wrs.db == nil {
-		return fmt.Errorf("pebble db is not initialized")
-	}
-
-	writeOpts := pebble.Sync // Ensure data is flushed to disk
-	err := wrs.db.Delete([]byte(key), writeOpts)
+	err := wrs.db.Delete(key)
 	if err != nil {
-		// Pebble's Delete doesn't error if key not found, it's a successful deletion of nothing.
-		wrs.logger.Printf("ERROR: Pebble Delete failed for Key=%s: %v", key, err)
-		return fmt.Errorf("pebble delete failed for key %s: %w", key, err)
+		return err
 	}
 	wrs.logger.Printf("Successfully deleted key %s", key)
-	// Pebble's Delete doesn't error if key not found, it's a successful deletion of nothing.
-	wrs.logger.Printf("DB Delete successful: key=%s", key)
 	return nil
 }
 
@@ -294,124 +239,18 @@ func (wrs *WALReplicationServer) GetStats() map[string]string {
 // --- HTTP Handler Methods ---
 // GetLatestSequenceNumber returns the latest sequence number from PebbleDB.
 func (wrs *WALReplicationServer) GetLatestSequenceNumber() (uint64, error) {
-	if wrs.db == nil {
-		return 0, fmt.Errorf("pebble db is not initialized")
+	seqNum, err := wrs.db.GetLatestSequenceNumber()
+	if err != nil {
+		return 0, err
 	}
-	// A snapshot provides a consistent view of the DB at a point in time,
-	// and its sequence number is the latest sequence number at that time.
-	snap := wrs.db.NewSnapshot()
-	defer snap.Close()
-
-	// Get the reflect.Value of the struct
-	v := reflect.ValueOf(snap).Elem()
-	// Access the unexported (private) field by name
-	f := v.FieldByName("seqNum")
-	if !f.IsValid() {
-		return 0, fmt.Errorf("no such field: seqNum")
-	}
-	// Read the value (note: Can only read, not set)
-	seqNum := f.Uint()
-
 	return seqNum, nil
 }
 
 // GetUpdatesSince scans the WAL files and returns all mutation events since a given sequence number.
 func (wrs *WALReplicationServer) GetUpdatesSince(sinceSeq uint64) ([]WALUpdate, error) {
-	if wrs.db == nil {
-		return nil, fmt.Errorf("pebble db is not initialized")
-	}
-
-	walFiles, err := filepath.Glob(filepath.Join(wrs.config.DataDir, "*.log"))
+	updates, err := wrs.db.GetUpdatesSince(sinceSeq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list WAL files: %w", err)
-	}
-	sort.Strings(walFiles)
-
-	var updates []WALUpdate
-
-	for _, walFile := range walFiles {
-		f, err := os.Open(walFile)
-		if err != nil {
-			wrs.logger.Printf("WARNING: could not open WAL file %s: %v", walFile, err)
-			continue
-		}
-
-		r := record.NewReader(f, 0)
-		for {
-			rr, err := r.Next()
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				// It's possible to hit partial records at the end of a file.
-				// We can log this but continue to the next file.
-				wrs.logger.Printf("WARNING: error reading next record from %s: %v", walFile, err)
-				break
-			}
-
-			batchRepr, err := io.ReadAll(rr)
-			if err != nil {
-				wrs.logger.Printf("WARNING: could not read WAL record from %s: %v", walFile, err)
-				continue
-			}
-
-			if len(batchRepr) < 12 { // Header size
-				continue
-			}
-
-			// The batch representation starts with an 8-byte sequence number and 4-byte count.
-			baseSeqNum := binary.LittleEndian.Uint64(batchRepr[:8])
-			count := binary.LittleEndian.Uint32(batchRepr[8:12])
-
-			// If the entire batch is before the sequence number we're interested in, skip it.
-			if baseSeqNum+uint64(count) <= sinceSeq {
-				continue
-			}
-
-			var batch pebble.Batch
-			if err := batch.SetRepr(batchRepr); err != nil {
-				wrs.logger.Printf("WARNING: could not decode batch from WAL file %s: %v", walFile, err)
-				continue
-			}
-
-			iter, err := batch.NewIter(nil)
-			if err != nil {
-				wrs.logger.Printf("WARNING: could not create iterator for batch from WAL file %s: %v", walFile, err)
-				continue
-			}
-
-			currentSeqNum := baseSeqNum
-			for iter.First(); iter.Valid(); iter.Next() {
-				if currentSeqNum >= sinceSeq {
-					var op string
-					var value string
-					internalKey := base.DecodeInternalKey(iter.Key())
-					keyString := string(internalKey.UserKey)
-
-					switch internalKey.Kind() {
-					case base.InternalKeyKindSet:
-						op = "put"
-						value = string(iter.Value())
-					case base.InternalKeyKindDelete:
-						op = "delete"
-					default:
-						// Skip other kinds of operations (e.g., Merge, LogData)
-						currentSeqNum++
-						continue
-					}
-
-					updates = append(updates, WALUpdate{
-						SeqNum: currentSeqNum,
-						Op:     op,
-						Key:    keyString,
-						Value:  value,
-					})
-				}
-				currentSeqNum++
-			}
-			iter.Close()
-		}
-		f.Close() // Close file at the end of processing it.
+		return nil, err
 	}
 	return updates, nil
 }
