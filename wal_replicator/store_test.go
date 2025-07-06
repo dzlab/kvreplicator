@@ -382,6 +382,7 @@ func TestPebbleDBStoreGetUpdatesSince_CorruptedWALFile(t *testing.T) {
 	assert.NoError(t, err) // Should not error, just log warnings
 	assert.Contains(t, logBuffer.String(), fmt.Sprintf("WARNING: error reading next record from %s", corruptedFile))
 	assert.Contains(t, logBuffer.String(), fmt.Sprintf("WARNING: could not decode batch from WAL file %s", corruptedFile))
+	assert.Empty(t, updates)
 }
 
 func TestPebbleDBStoreGetUpdatesSince_ShortCorruptedData(t *testing.T) {
@@ -407,7 +408,7 @@ func TestPebbleDBStoreGetUpdatesSince_ShortCorruptedData(t *testing.T) {
 	updates, err := store.GetUpdatesSince(0)
 	assert.NoError(t, err)
 	assert.Empty(t, logBuffer.String())
-	assert.NotNil(t, updates)
+	assert.Empty(t, updates)
 }
 
 func TestPebbleDBStoreGetUpdatesSince_LogDataKind(t *testing.T) {
