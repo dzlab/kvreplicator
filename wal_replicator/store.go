@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"kvreplicator/internal/base"
 	"log"
 	"os"
 	"path/filepath"
@@ -218,21 +219,19 @@ func (pbs *PebbleDBStore) GetUpdatesSince(sinceSeq uint64) ([]WALUpdate, error) 
 				if currentSeqNum >= sinceSeq {
 					var op string
 					var value string
-					keyBytes := iter.Key()
-					valueBytes := iter.Value()
-					keyString := string(keyBytes)
+					internalKey := base.DecodeInternalKey(iter.Key())
+					keyString := string(internalKey.UserKey)
 
-					// NOTE: Without access to pebble's internal/base package,
-					// reliably distinguishing 'set' from 'delete' for WAL updates
-					// based solely on public APIs is challenging, especially if a
-					// key is set to an empty value. This implementation makes a
-					// best-effort guess: if there's a value, it's a 'put', otherwise 'delete'.
-					// This is an oversimplification and may not be accurate for all cases.
-					if len(valueBytes) > 0 {
+					switch internalKey.Kind() {
+					case base.InternalKeyKindSet:
 						op = "put"
-						value = string(valueBytes)
-					} else {
+						value = string(iter.Value())
+					case base.InternalKeyKindDelete:
 						op = "delete"
+					default:
+						// Skip other kinds of operations (e.g., Merge, LogData)
+						currentSeqNum++
+						continue
 					}
 
 					updates = append(updates, WALUpdate{
