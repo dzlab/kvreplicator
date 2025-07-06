@@ -218,19 +218,15 @@ func TestPebbleDBStoreGetLatestSequenceNumber(t *testing.T) {
 	assert.Contains(t, err.Error(), "pebble db is not initialized")
 }
 
-func TestPebbleDBStoreGetUpdatesSince(t *testing.T) {
-	dataDir, logger := setupTestDB(t)
+// Helper function to set up a store with predefined WAL updates for common scenarios.
+// The returned store is open and ready for operations.
+// The caller is responsible for calling teardownTestDB(t, store, "") to close the store
+// if the store is not nil.
+func setupStoreWithWALUpdates(t *testing.T, dataDir string, logger *log.Logger) (*PebbleDBStore, []WALUpdate) {
 	store, err := NewPebbleDBStore(dataDir, logger)
 	assert.NoError(t, err)
 	assert.NotNil(t, store)
-	defer teardownTestDB(t, store, dataDir)
 
-	// Test case 1: No updates initially
-	updates, err := store.GetUpdatesSince(0)
-	assert.NoError(t, err)
-	assert.Empty(t, updates)
-
-	// Perform some operations to generate WAL entries
 	err = store.Put("k1", "v1")
 	assert.NoError(t, err) // SeqNum 1
 	err = store.Put("k2", "v2")
@@ -244,14 +240,10 @@ func TestPebbleDBStoreGetUpdatesSince(t *testing.T) {
 	// Then re-open to ensure we read from disk, not memory.
 	err = store.Close()
 	assert.NoError(t, err)
+
 	store, err = NewPebbleDBStore(dataDir, logger)
 	assert.NoError(t, err)
 	assert.NotNil(t, store)
-
-	// Test case 2: Get all updates since 0
-	updates, err = store.GetUpdatesSince(0)
-	assert.NoError(t, err)
-	assert.Len(t, updates, 4)
 
 	expectedUpdates := []WALUpdate{
 		{SeqNum: 1, Op: "put", Key: "k1", Value: "v1"},
@@ -259,30 +251,83 @@ func TestPebbleDBStoreGetUpdatesSince(t *testing.T) {
 		{SeqNum: 3, Op: "delete", Key: "k1", Value: ""},
 		{SeqNum: 4, Op: "put", Key: "k3", Value: "v3"},
 	}
-	assert.Equal(t, expectedUpdates, updates)
+	return store, expectedUpdates
+}
 
-	// Test case 3: Get updates since SeqNum 2
-	updates, err = store.GetUpdatesSince(2)
+func TestPebbleDBStoreGetUpdatesSince_NoUpdatesInitially(t *testing.T) {
+	dataDir, logger := setupTestDB(t)
+	defer teardownTestDB(t, nil, dataDir)
+
+	store, err := NewPebbleDBStore(dataDir, logger)
+	assert.NoError(t, err)
+	assert.NotNil(t, store)
+	defer teardownTestDB(t, store, "")
+
+	updates, err := store.GetUpdatesSince(0)
+	assert.NoError(t, err)
+	assert.Empty(t, updates)
+}
+
+func TestPebbleDBStoreGetUpdatesSince_GetAllUpdates(t *testing.T) {
+	dataDir, logger := setupTestDB(t)
+	defer teardownTestDB(t, nil, dataDir)
+
+	store, expectedUpdates := setupStoreWithWALUpdates(t, dataDir, logger)
+	defer teardownTestDB(t, store, "")
+
+	updates, err := store.GetUpdatesSince(0)
+	assert.NoError(t, err)
+	assert.Len(t, updates, 4)
+	assert.Equal(t, expectedUpdates, updates)
+}
+
+func TestPebbleDBStoreGetUpdatesSince_SpecificSequence(t *testing.T) {
+	dataDir, logger := setupTestDB(t)
+	defer teardownTestDB(t, nil, dataDir)
+
+	store, expectedUpdates := setupStoreWithWALUpdates(t, dataDir, logger)
+	defer teardownTestDB(t, store, "")
+
+	updates, err := store.GetUpdatesSince(2)
 	assert.NoError(t, err)
 	assert.Len(t, updates, 3)
 	assert.Equal(t, expectedUpdates[1:], updates)
+}
 
-	// Test case 4: Get updates since latest SeqNum (should be empty)
+func TestPebbleDBStoreGetUpdatesSince_LatestSequence(t *testing.T) {
+	dataDir, logger := setupTestDB(t)
+	defer teardownTestDB(t, nil, dataDir)
+
+	store, _ := setupStoreWithWALUpdates(t, dataDir, logger)
+	defer teardownTestDB(t, store, "")
+
 	latestSeq, err := store.GetLatestSequenceNumber()
 	assert.NoError(t, err)
-	updates, err = store.GetUpdatesSince(latestSeq)
+	updates, err := store.GetUpdatesSince(latestSeq)
 	assert.NoError(t, err)
 	assert.Empty(t, updates)
+}
 
-	// Test case 5: Operations on a closed DB
+func TestPebbleDBStoreGetUpdatesSince_ClosedDB(t *testing.T) {
+	dataDir, logger := setupTestDB(t)
+	store, err := NewPebbleDBStore(dataDir, logger)
+	assert.NoError(t, err)
+	assert.NotNil(t, store)
+	defer teardownTestDB(t, store, dataDir)
+
 	err = store.Close()
 	assert.NoError(t, err)
+
 	_, err = store.GetUpdatesSince(0)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "pebble db is not initialized")
+}
 
-	// Test case 6: Simulate a missing WAL file (by removing one)
-	// Generate more logs to potentially get multiple WAL files
+func TestPebbleDBStoreGetUpdatesSince_MissingWALFile(t *testing.T) {
+	dataDir, logger := setupTestDB(t)
+	defer teardownTestDB(t, nil, dataDir)
+
+	// Generate enough logs to potentially get multiple WAL files
 	storeToGenerateLogs, err := NewPebbleDBStore(dataDir, logger)
 	assert.NoError(t, err)
 	for i := 0; i < 100; i++ { // Perform enough operations to potentially roll over WAL files
@@ -294,72 +339,105 @@ func TestPebbleDBStoreGetUpdatesSince(t *testing.T) {
 
 	walFiles, err := filepath.Glob(filepath.Join(dataDir, "*.log"))
 	assert.NoError(t, err)
-	assert.True(t, len(walFiles) >= 1) // Ensure at least one log file exists
+	assert.True(t, len(walFiles) >= 1)
 
 	// Capture log output for warnings
 	var logBuffer bytes.Buffer
-	logger = log.New(&logBuffer, "TEST_LOG: ", log.LstdFlags|log.Lshortfile)
-	store, err = NewPebbleDBStore(dataDir, logger) // Reopen with capturing logger
+	captureLogger := log.New(&logBuffer, "TEST_LOG: ", log.LstdFlags|log.Lshortfile)
+	store, err := NewPebbleDBStore(dataDir, captureLogger) // Reopen with capturing logger
 	assert.NoError(t, err)
+	defer teardownTestDB(t, store, "")
 
 	fileToRemove := walFiles[0] // Pick the first log file to remove
 	err = os.Remove(fileToRemove)
 	assert.NoError(t, err)
 
-	updates, err = store.GetUpdatesSince(0)
+	updates, err := store.GetUpdatesSince(0)
 	assert.NoError(t, err) // Should not error, just log a warning for missing file
 	assert.True(t, len(updates) > 0)
 	assert.Contains(t, logBuffer.String(), fmt.Sprintf("WARNING: could not open WAL file %s", fileToRemove))
-	logBuffer.Reset() // Clear buffer for next test
+}
 
-	// Test case 7: Simulate corrupted WAL file
-	corruptedFile := filepath.Join(dataDir, "000000.log") // Ensure this name won't conflict, often Pebble starts from 000000.log
+func TestPebbleDBStoreGetUpdatesSince_CorruptedWALFile(t *testing.T) {
+	dataDir, logger := setupTestDB(t)
+	defer teardownTestDB(t, nil, dataDir)
+
+	store, err := NewPebbleDBStore(dataDir, logger)
+	assert.NoError(t, err)
+	assert.NotNil(t, store)
+	err = store.Close() // Close to ensure it's not holding a lock when we write over its file
+	assert.NoError(t, err)
+
+	corruptedFile := filepath.Join(dataDir, "000000.log") // Common first log file name for PebbleDB
 	err = os.WriteFile(corruptedFile, []byte("this is corrupted data that is too short"), 0644)
 	assert.NoError(t, err)
 
-	updates, err = store.GetUpdatesSince(0)
+	var logBuffer bytes.Buffer
+	captureLogger := log.New(&logBuffer, "TEST_LOG: ", log.LstdFlags|log.Lshortfile)
+	store, err = NewPebbleDBStore(dataDir, captureLogger)
+	assert.NoError(t, err)
+	defer teardownTestDB(t, store, "")
+
+	updates, err := store.GetUpdatesSince(0)
 	assert.NoError(t, err) // Should not error, just log warnings
 	assert.Contains(t, logBuffer.String(), fmt.Sprintf("WARNING: error reading next record from %s", corruptedFile))
 	assert.Contains(t, logBuffer.String(), fmt.Sprintf("WARNING: could not decode batch from WAL file %s", corruptedFile))
-	logBuffer.Reset()
+}
 
-	// Test case 8: Test empty batchRepr (len < 12) due to very short corrupted data
-	corruptedFileShort := filepath.Join(dataDir, "000001.log") // Another dummy file
-	err = os.WriteFile(corruptedFileShort, []byte("short"), 0644)
+func TestPebbleDBStoreGetUpdatesSince_ShortCorruptedData(t *testing.T) {
+	dataDir, logger := setupTestDB(t)
+	defer teardownTestDB(t, nil, dataDir)
+
+	store, err := NewPebbleDBStore(dataDir, logger)
 	assert.NoError(t, err)
-	updates, err = store.GetUpdatesSince(0)
-	assert.NoError(t, err)              // Should not error, just log warnings
-	assert.Empty(t, logBuffer.String()) // No specific warning for len < 12, it just continues.
-	// The `if len(batchRepr) < 12` path is hit internally by the previous corrupt data test if `io.ReadAll`
-	// returns less than 12 bytes. This specific test just ensures no crash.
-
-	// Test case 9: Test `internalKey.Kind()` default case (e.g., LogData)
+	assert.NotNil(t, store)
 	err = store.Close()
 	assert.NoError(t, err)
-	finalDataDir, logger := setupTestDB(t) // Fresh directory for controlled seq numbers
-	defer teardownTestDB(t, nil, finalDataDir)
-	finalStore, err := NewPebbleDBStore(finalDataDir, logger)
+
+	corruptedFileShort := filepath.Join(dataDir, "000001.log") // Use a different dummy file
+	err = os.WriteFile(corruptedFileShort, []byte("short"), 0644)
 	assert.NoError(t, err)
-	defer finalStore.Close()
+
+	var logBuffer bytes.Buffer
+	captureLogger := log.New(&logBuffer, "TEST_LOG: ", log.LstdFlags|log.Lshortfile)
+	store, err = NewPebbleDBStore(dataDir, captureLogger)
+	assert.NoError(t, err)
+	defer teardownTestDB(t, store, "")
+
+	updates, err := store.GetUpdatesSince(0)
+	assert.NoError(t, err)
+	assert.Empty(t, logBuffer.String())
+	assert.NotNil(t, updates)
+}
+
+func TestPebbleDBStoreGetUpdatesSince_LogDataKind(t *testing.T) {
+	dataDir, logger := setupTestDB(t)
+	defer teardownTestDB(t, nil, dataDir)
+
+	store, err := NewPebbleDBStore(dataDir, logger)
+	assert.NoError(t, err)
+	assert.NotNil(t, store)
+	defer teardownTestDB(t, store, "")
 
 	// Apply a batch that includes LogData entries
-	batchForCoverage := finalStore.db.NewBatch()
+	batchForCoverage := store.db.NewBatch()
 	batchForCoverage.Set([]byte("cov_key1"), []byte("cov_value1"), nil) // SeqNum 1
 	batchForCoverage.LogData([]byte("logdata_payload_1"), nil)          // SeqNum 2 (skipped by GetUpdatesSince)
 	batchForCoverage.Set([]byte("cov_key2"), []byte("cov_value2"), nil) // SeqNum 3
 	batchForCoverage.Delete([]byte("cov_key1"), nil)                    // SeqNum 4
 	batchForCoverage.LogData([]byte("logdata_payload_2"), nil)          // SeqNum 5 (skipped)
 
-	err = finalStore.db.Apply(batchForCoverage, pebble.Sync)
+	err = store.db.Apply(batchForCoverage, pebble.Sync)
 	assert.NoError(t, err)
 
 	// Close and reopen to ensure WALs are flushed and readable from disk.
-	err = finalStore.Close()
+	err = store.Close()
 	assert.NoError(t, err)
-	finalStore, err = NewPebbleDBStore(finalDataDir, logger)
+	store, err = NewPebbleDBStore(dataDir, logger)
 	assert.NoError(t, err)
+	defer store.Close() // Ensure this re-opened store is closed
 
-	updates, err = finalStore.GetUpdatesSince(0)
+	updates, err := store.GetUpdatesSince(0)
 	assert.NoError(t, err)
 	assert.Len(t, updates, 3) // Only 3 non-LogData updates expected
 
