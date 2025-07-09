@@ -107,7 +107,7 @@ func (wrs *WALReplicationServer) Start() error {
 
 // Shutdown gracefully shuts down the WALReplicationServer, including the HTTP server and PebbleDB.
 func (wrs *WALReplicationServer) Shutdown() error {
-	wrs.logger.Println("Shutting down WALReplicationServer placeholder...")
+	wrs.logger.Println("Shutting down WALReplicationServer...")
 
 	// Shutdown HTTP server
 	if wrs.httpServer != nil {
@@ -129,10 +129,7 @@ func (wrs *WALReplicationServer) Shutdown() error {
 		wrs.zkManager.Close()
 	}
 
-	// --- Placeholder Shutdown Logic ---
-	// Simulate shutting down internal WAL components (None implemented yet)
-	wrs.logger.Println("Placeholder WAL internal components shut down.")
-	// --- End Placeholder Shutdown Logic ---
+	// No specific WAL internal components to shut down yet, as replication logic is not implemented.
 
 	// Close PebbleDB
 	if err := wrs.Close(); err != nil {
@@ -140,7 +137,7 @@ func (wrs *WALReplicationServer) Shutdown() error {
 		// Continue with other shutdown steps if possible, but report the error
 	}
 
-	wrs.logger.Println("WALReplicationServer placeholder shut down successfully.")
+	wrs.logger.Println("WALReplicationServer shut down successfully.")
 	return nil
 }
 
@@ -224,15 +221,21 @@ func (wrs *WALReplicationServer) GetPrimary() string {
 	return primaryAddr
 }
 
-// Placeholder method for GetStats
+// GetStats returns various statistics about the WALReplicationServer.
 func (wrs *WALReplicationServer) GetStats() map[string]string {
-	wrs.logger.Println("Received placeholder GetStats request.")
-	// In a real implementation, this would return WAL/replication stats
+	wrs.logger.Println("Received GetStats request.")
+	// In a real implementation, this would return detailed WAL/replication stats.
+	// For now, it provides basic node information and status.
 	return map[string]string{
-		"status":             "placeholder - WAL replication not implemented",
-		"replication_status": "not implemented",
 		"node_id":            wrs.config.NodeID,
+		"status":             "running",
+		"http_address":       wrs.config.HTTPAddr,
+		"internal_address":   wrs.config.InternalBindAddress,
 		"data_dir":           wrs.config.DataDir,
+		"is_primary":         fmt.Sprintf("%t", wrs.IsPrimary()),
+		"current_primary":    wrs.GetPrimary(),
+		"replication_status": "replication logic not yet implemented",
+		// Add more detailed stats here as features are implemented
 	}
 }
 
