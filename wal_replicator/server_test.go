@@ -493,11 +493,24 @@ func TestWALReplicationServer_HTTP_StatusEndpoints(t *testing.T) {
 		}
 		body, _ := ioutil.ReadAll(resp.Body)
 		// Check for all the expected placeholder stats fields
-		if !strings.Contains(string(body), "status: placeholder - WAL replication not implemented") ||
-			!strings.Contains(string(body), "replication_status: not implemented") ||
-			!strings.Contains(string(body), "node_id: test-node") || // Matches config in newTestWALServer
-			!strings.Contains(string(body), fmt.Sprintf("data_dir: %s", server.config.DataDir)) {
-			t.Errorf("Expected placeholder stats, got '%s'", string(body))
+		// Check for all the expected stats fields from the updated GetStats
+		expectedStrings := []string{
+			"status: running",
+			"replication_status: replication logic not yet implemented",
+			"node_id: test-node", // Matches config in newTestWALServer
+			fmt.Sprintf("data_dir: %s", server.config.DataDir),
+			fmt.Sprintf("http_address: %s", server.config.HTTPAddr),
+			fmt.Sprintf("internal_address: %s", server.config.InternalBindAddress),
+			"is_primary: false", // In test setup, ZK is not fully functional for primary election
+			"current_primary: unknown (error fetching primary address)", // Same as above
+		}
+
+		bodyStr := string(body)
+		for _, expected := range expectedStrings {
+			if !strings.Contains(bodyStr, expected) {
+				t.Errorf("Expected stats to contain '%s', but got '%s'", expected, bodyStr)
+				break // Fail fast if one check fails
+			}
 		}
 	})
 }
