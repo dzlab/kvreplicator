@@ -14,24 +14,31 @@ import (
 const primaryElectionPath = "/kvreplicator/wal/primary_election"
 const nodesPath = "/kvreplicator/wal/nodes" // Define nodesPath as a constant
 
+// NodeChangeCallback is a function type for callbacks when the active node list changes.
+// It receives the updated map of active nodes (nodeID -> internalBindAddress).
+type NodeChangeCallback func(map[string]string)
+
 // ZKManager handles ZooKeeper operations for WALReplicationServer.
 type ZKManager struct {
 	conn                *zk.Conn
 	logger              *log.Logger
 	nodeID              string
-	internalBindAddress string            // Store internal bind address for re-registration
-	activeNodes         map[string]string // Map of nodeID to internalBindAddress, managed by ZK events
-	electionNodePath    string            // Stores the path of this node's ephemeral sequential node for primary election
-	mu                  sync.RWMutex      // Mutex to protect activeNodes
+	internalBindAddress string             // Store internal bind address for re-registration
+	activeNodes         map[string]string  // Map of nodeID to internalBindAddress, managed by ZK events
+	electionNodePath    string             // Stores the path of this node's ephemeral sequential node for primary election
+	mu                  sync.RWMutex       // Mutex to protect activeNodes
+	nodeChangeCallback  NodeChangeCallback // Callback to notify on node list changes
 }
 
 // NewZKManager creates a new ZKManager instance.
-func NewZKManager(logger *log.Logger, nodeID string) *ZKManager {
+// It accepts a NodeChangeCallback to be invoked when the active nodes list changes.
+func NewZKManager(logger *log.Logger, nodeID string, callback NodeChangeCallback) *ZKManager {
 	return &ZKManager{
-		logger:      logger,
-		nodeID:      nodeID,
-		activeNodes: make(map[string]string),
-		mu:          sync.RWMutex{},
+		logger:             logger,
+		nodeID:             nodeID,
+		activeNodes:        make(map[string]string),
+		mu:                 sync.RWMutex{},
+		nodeChangeCallback: callback,
 	}
 }
 
@@ -230,6 +237,10 @@ func (zkm *ZKManager) watchActiveNodes() (<-chan zk.Event, error) {
 	zkm.mu.Unlock()
 
 	zkm.logger.Printf("Successfully updated active nodes list: %v", zkm.GetActiveNodes())
+	// Notify the callback listener if it's set
+	if zkm.nodeChangeCallback != nil {
+		zkm.nodeChangeCallback(newActiveNodes)
+	}
 	return eventChan, nil
 }
 
