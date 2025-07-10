@@ -19,6 +19,7 @@ type WALReplicationServer struct {
 	db         *PebbleDBStore // Use the new PebbleDBStore type
 	httpServer *http.Server   // Add HTTP server instance for graceful shutdown
 	zkManager  *ZKManager     // Add ZKManager instance for ZooKeeper operations
+	replicator *Replicator    // Add Replicator instance for WAL push replication
 }
 
 // WALConfig holds configuration parameters for the WALReplicationServer.
@@ -55,12 +56,29 @@ func NewWALReplicationServer(cfg WALConfig) (*WALReplicationServer, error) {
 		db:     dbStore, // Assign the new PebbleDBStore
 	}
 
-	// Initialize ZKManager and connect
-	server.zkManager = NewZKManager(logger, cfg.NodeID) // Initialize ZKManager without connection
+	// Define the node change callback to trigger replicator reconciliation
+	nodeChangeCallback := func(activeNodes map[string]string) {
+		server.logger.Printf("Node change detected by WALReplicationServer. Triggering replicator reconciliation.")
+		if server.replicator != nil {
+			server.replicator.TriggerReconciliation()
+		}
+	}
+
+	// Initialize ZKManager and connect, passing the node change callback
+	server.zkManager = NewZKManager(logger, cfg.NodeID, nodeChangeCallback)
 	if err := server.zkManager.Connect(cfg.ZkServers); err != nil {
 		dbStore.Close() // Ensure DB is closed if ZK connection fails
 		return nil, err
 	}
+
+	// Initialize the Replicator
+	server.replicator = NewReplicator(
+		logger,
+		cfg.NodeID,
+		server,           // WALReplicationServer implements PrimaryChecker (IsPrimary, GetPrimary)
+		server.zkManager, // ZKManager implements NodeRegistry (GetActiveNodes)
+		server.db,        // PebbleDBStore implements WALSource (GetLatestSequenceNumber, GetUpdatesSince)
+	)
 
 	logger.Println("WALReplicationServer instance created successfully.")
 	return server, nil
@@ -77,6 +95,11 @@ func (wrs *WALReplicationServer) Start() error {
 			wrs.logger.Printf("Error starting ZKManager: %v", err)
 			return err // Fail if ZKManager cannot start properly
 		}
+	}
+
+	// Start the Replicator if initialized
+	if wrs.replicator != nil {
+		wrs.replicator.Start()
 	}
 
 	wrs.logger.Printf("WALReplicationServer node %s started successfully.", wrs.config.NodeID)
@@ -124,12 +147,15 @@ func (wrs *WALReplicationServer) Shutdown() error {
 		wrs.httpServer = nil
 	}
 
+	// Stop the Replicator
+	if wrs.replicator != nil {
+		wrs.replicator.Stop()
+	}
+
 	// Close ZooKeeper connection via ZKManager
 	if wrs.zkManager != nil {
 		wrs.zkManager.Close()
 	}
-
-	// No specific WAL internal components to shut down yet, as replication logic is not implemented.
 
 	// Close PebbleDB
 	if err := wrs.Close(); err != nil {
