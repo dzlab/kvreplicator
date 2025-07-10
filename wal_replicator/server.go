@@ -75,11 +75,9 @@ func NewWALReplicationServer(cfg WALConfig) (*WALReplicationServer, error) {
 	server.replicator = NewReplicator(
 		logger,
 		cfg.NodeID,
-		server.IsPrimary,
-		server.GetPrimary,
-		server.zkManager.GetActiveNodes,
-		server.db.GetLatestSequenceNumber,
-		server.db.GetUpdatesSince,
+		server,           // WALReplicationServer implements PrimaryChecker (IsPrimary, GetPrimary)
+		server.zkManager, // ZKManager implements NodeRegistry (GetActiveNodes)
+		server.db,        // PebbleDBStore implements WALSource (GetLatestSequenceNumber, GetUpdatesSince)
 	)
 
 	logger.Println("WALReplicationServer instance created successfully.")

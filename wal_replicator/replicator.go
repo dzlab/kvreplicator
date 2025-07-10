@@ -8,14 +8,30 @@ import (
 )
 
 // Replicator manages the push-based WAL replication from primary to followers.
+// PrimaryChecker defines the interface for checking primary status and getting primary address.
+type PrimaryChecker interface {
+	IsPrimary() bool
+	GetPrimary() string
+}
+
+// NodeRegistry defines the interface for getting active nodes from the registry.
+type NodeRegistry interface {
+	GetActiveNodes() map[string]string
+}
+
+// WALSource defines the interface for retrieving WAL updates and sequence numbers.
+type WALSource interface {
+	GetLatestSequenceNumber() (uint64, error)
+	GetUpdatesSince(uint64) ([]WALUpdate, error)
+}
+
+// Replicator manages the push-based WAL replication from primary to followers.
 type Replicator struct {
-	logger              *log.Logger
-	nodeID              string
-	isPrimaryFunc       func() bool                       // Function to query if this node is primary
-	getPrimary          func() string                     // Function to get the current primary's address
-	getActiveNodesFunc  func() map[string]string          // Function to get active nodes from ZKManager
-	getLatestSeqNumFunc func() (uint64, error)            // Function to get latest sequence number from DB
-	getUpdatesSinceFunc func(uint64) ([]WALUpdate, error) // Function to get WAL updates from DB
+	logger         *log.Logger
+	nodeID         string
+	primaryChecker PrimaryChecker // Interface for primary status and address
+	nodeRegistry   NodeRegistry   // Interface for active node management
+	walSource      WALSource      // Interface for WAL data access
 
 	// Replication state
 	followerConnections map[string]*rpc.Client // Map of follower NodeID to RPC client connection
@@ -32,20 +48,16 @@ type Replicator struct {
 func NewReplicator(
 	logger *log.Logger,
 	nodeID string,
-	isPrimaryFunc func() bool,
-	getPrimary func() string,
-	getActiveNodesFunc func() map[string]string,
-	getLatestSeqNumFunc func() (uint64, error),
-	getUpdatesSinceFunc func(uint64) ([]WALUpdate, error),
+	primaryChecker PrimaryChecker,
+	nodeRegistry NodeRegistry,
+	walSource WALSource,
 ) *Replicator {
 	return &Replicator{
 		logger:              logger,
 		nodeID:              nodeID,
-		isPrimaryFunc:       isPrimaryFunc,
-		getPrimary:          getPrimary,
-		getActiveNodesFunc:  getActiveNodesFunc,
-		getLatestSeqNumFunc: getLatestSeqNumFunc,
-		getUpdatesSinceFunc: getUpdatesSinceFunc,
+		primaryChecker:      primaryChecker,
+		nodeRegistry:        nodeRegistry,
+		walSource:           walSource,
 		followerConnections: make(map[string]*rpc.Client),
 		followerSequence:    make(map[string]uint64),
 		stopChan:            make(chan struct{}),
@@ -103,14 +115,14 @@ func (r *Replicator) replicationLoop() {
 
 // reconcileFollowerConnections establishes/removes connections based on active nodes and primary status.
 func (r *Replicator) reconcileFollowerConnections() {
-	if !r.isPrimaryFunc() {
+	if !r.primaryChecker.IsPrimary() {
 		r.logger.Println("Not primary, disconnecting all followers.")
 		r.disconnectAllFollowers()
 		return
 	}
 
 	r.logger.Println("Reconciling follower connections as primary...")
-	activeNodes := r.getActiveNodesFunc()
+	activeNodes := r.nodeRegistry.GetActiveNodes()
 
 	// Identify nodes that are no longer active followers
 	r.mu.Lock()
@@ -163,14 +175,14 @@ func (r *Replicator) disconnectAllFollowers() {
 
 // pushWALUpdates attempts to push WAL entries to all connected followers.
 func (r *Replicator) pushWALUpdates() {
-	if !r.isPrimaryFunc() {
+	if !r.primaryChecker.IsPrimary() {
 		return // Only primary pushes updates
 	}
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	latestSeqNum, err := r.getLatestSeqNumFunc()
+	latestSeqNum, err := r.walSource.GetLatestSequenceNumber()
 	if err != nil {
 		r.logger.Printf("ERROR: Failed to get latest sequence number from DB: %v", err)
 		return
@@ -185,7 +197,7 @@ func (r *Replicator) pushWALUpdates() {
 			}
 
 			r.logger.Printf("Pushing updates to follower %s from sequence %d to %d", id, lastSyncedSeq, latestSeqNum)
-			updates, err := r.getUpdatesSinceFunc(lastSyncedSeq)
+			updates, err := r.walSource.GetUpdatesSince(lastSyncedSeq)
 			if err != nil {
 				r.logger.Printf("ERROR: Failed to get WAL updates for follower %s from DB: %v", id, err)
 				return
