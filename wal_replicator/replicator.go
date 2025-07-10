@@ -7,6 +7,17 @@ import (
 	"time"
 )
 
+// WALApplyRequest defines the RPC request for applying WAL updates.
+type WALApplyRequest struct {
+	Updates []WALUpdate
+}
+
+// WALApplyReply defines the RPC reply for applying WAL updates.
+type WALApplyReply struct {
+	AppliedCount int
+	Error        string
+}
+
 // Replicator manages the push-based WAL replication from primary to followers.
 // PrimaryChecker defines the interface for checking primary status and getting primary address.
 type PrimaryChecker interface {
@@ -180,7 +191,18 @@ func (r *Replicator) pushWALUpdates() {
 	}
 
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	// Copy current state to avoid holding RLock across RPC calls and goroutine creation
+	followerStates := make(map[string]struct {
+		client   *rpc.Client
+		sequence uint64
+	})
+	for id, client := range r.followerConnections {
+		followerStates[id] = struct {
+			client   *rpc.Client
+			sequence uint64
+		}{client: client, sequence: r.followerSequence[id]}
+	}
+	r.mu.RUnlock() // Release RLock early
 
 	latestSeqNum, err := r.walSource.GetLatestSequenceNumber()
 	if err != nil {
@@ -188,9 +210,8 @@ func (r *Replicator) pushWALUpdates() {
 		return
 	}
 
-	for followerID, conn := range r.followerConnections {
-		go func(id string, client *rpc.Client) {
-			lastSyncedSeq := r.followerSequence[id]
+	for followerID, state := range followerStates {
+		go func(id string, client *rpc.Client, lastSyncedSeq uint64) {
 			if latestSeqNum <= lastSyncedSeq {
 				// r.logger.Printf("Follower %s is up-to-date (seq: %d)", id, lastSyncedSeq)
 				return
@@ -210,22 +231,28 @@ func (r *Replicator) pushWALUpdates() {
 				return
 			}
 
-			// Define the RPC request and response types if needed for actual RPC calls
-			// For now, assume a simple call for placeholder.
-			var reply string // Or a more structured reply if needed
+			req := WALApplyRequest{Updates: updates}
+			var reply WALApplyReply
 
-			// Example: Call a remote RPC method on the follower
-			// client.Call("FollowerService.ApplyWALUpdates", updates, &reply)
-			// Replace with actual RPC call once follower RPC service is defined.
-			r.logger.Printf("INFO: Simulating push of %d updates to follower %s. (Need to implement actual RPC call).", len(updates), id)
-			_ = reply // Placeholder to avoid unused variable warning
+			// Call a remote RPC method on the follower
+			err = client.Call("WALReplicationServer.ApplyWALUpdates", req, &reply)
+			if err != nil {
+				r.logger.Printf("ERROR: RPC call to follower %s failed: %v", id, err)
+				// For simplicity, we just log and the next reconcile cycle will handle connection issues.
+				return
+			}
+
+			if reply.Error != "" {
+				r.logger.Printf("ERROR: Follower %s reported error applying WAL updates: %s", id, reply.Error)
+				return
+			}
 
 			// Update the last synced sequence number for this follower
 			r.mu.Lock()
 			r.followerSequence[id] = latestSeqNum
 			r.mu.Unlock()
-			r.logger.Printf("Successfully simulated push of updates to follower %s. New synced sequence: %d", id, latestSeqNum)
+			r.logger.Printf("Successfully pushed %d updates to follower %s. New synced sequence: %d", reply.AppliedCount, id, latestSeqNum)
 
-		}(followerID, conn)
+		}(followerID, state.client, state.sequence)
 	}
 }

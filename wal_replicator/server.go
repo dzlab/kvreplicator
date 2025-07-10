@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/rpc"
 	"os"
 	"strconv"
 	"strings"
@@ -70,6 +71,14 @@ func NewWALReplicationServer(cfg WALConfig) (*WALReplicationServer, error) {
 		dbStore.Close() // Ensure DB is closed if ZK connection fails
 		return nil, err
 	}
+
+	// Register the WALReplicationServer as an RPC server
+	if err := rpc.Register(server); err != nil {
+		dbStore.Close()
+		server.zkManager.Close()
+		return nil, fmt.Errorf("failed to register WALReplicationServer for RPC: %w", err)
+	}
+	rpc.HandleHTTP() // Expose RPC services over HTTP
 
 	// Initialize the Replicator
 	server.replicator = NewReplicator(
@@ -400,4 +409,46 @@ func (wrs *WALReplicationServer) setupWALHTTPServerMux() *http.ServeMux {
 	mux.HandleFunc("/wal/seqnum", wrs.handleWALSeqNum)
 
 	return mux
+}
+
+// ApplyWALUpdates is an RPC method that applies a batch of WAL updates received from the primary.
+func (wrs *WALReplicationServer) ApplyWALUpdates(req *WALApplyRequest, reply *WALApplyReply) error {
+	if wrs.IsPrimary() {
+		reply.Error = "node is primary, cannot apply updates from another primary"
+		wrs.logger.Printf("ERROR: Received ApplyWALUpdates RPC on primary node %s", wrs.config.NodeID)
+		return nil // Return nil error so the RPC call itself doesn't fail, but signal the logical error
+	}
+
+	if wrs.db == nil {
+		reply.Error = "PebbleDB is not initialized"
+		wrs.logger.Println("ERROR: ApplyWALUpdates failed: PebbleDB is not initialized.")
+		return nil
+	}
+
+	wrs.logger.Printf("Received %d WAL updates from primary.", len(req.Updates))
+	appliedCount := 0
+	for _, update := range req.Updates {
+		var err error
+		switch update.Op {
+		case "put":
+			err = wrs.db.Put(update.Key, update.Value)
+		case "delete":
+			err = wrs.db.Delete(update.Key)
+		default:
+			wrs.logger.Printf("WARNING: Unknown WAL update operation: %s for key %s", update.Op, update.Key)
+			continue
+		}
+
+		if err != nil {
+			reply.Error = fmt.Sprintf("Failed to apply update for key %s (op %s): %v", update.Key, update.Op, err)
+			wrs.logger.Printf("ERROR: Failed to apply WAL update: %s", reply.Error)
+			// Decide whether to stop on first error or continue. For now, stop and report.
+			return nil
+		}
+		appliedCount++
+	}
+
+	reply.AppliedCount = appliedCount
+	wrs.logger.Printf("Successfully applied %d WAL updates.", appliedCount)
+	return nil
 }
