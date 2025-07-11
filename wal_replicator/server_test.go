@@ -496,7 +496,7 @@ func TestWALReplicationServer_HTTP_StatusEndpoints(t *testing.T) {
 		// Check for all the expected stats fields from the updated GetStats
 		expectedStrings := []string{
 			"status: running",
-			"replication_status: replication logic not yet implemented",
+
 			"node_id: test-node", // Matches config in newTestWALServer
 			fmt.Sprintf("data_dir: %s", server.config.DataDir),
 			fmt.Sprintf("http_address: %s", server.config.HTTPAddr),

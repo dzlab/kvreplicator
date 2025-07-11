@@ -25,6 +25,20 @@ type WALSource interface {
 	GetUpdatesSince(uint64) ([]WALUpdate, error)
 }
 
+// ApplyWALUpdatesArgs defines the arguments for the RPC call to apply WAL updates.
+type ApplyWALUpdatesArgs struct {
+	Updates []WALUpdate
+}
+
+// ApplyWALUpdatesReply defines the reply for the RPC call to apply WAL updates.
+type ApplyWALUpdatesReply struct {
+	Success bool
+	Message string
+	// LastSeqNum can be used by the primary to confirm the follower's progress,
+	// especially useful for partial applications or error recovery.
+	LastSeqNum uint64
+}
+
 // Replicator manages the push-based WAL replication from primary to followers.
 type Replicator struct {
 	logger         *log.Logger
@@ -210,21 +224,36 @@ func (r *Replicator) pushWALUpdates() {
 				return
 			}
 
-			// Define the RPC request and response types if needed for actual RPC calls
-			// For now, assume a simple call for placeholder.
-			var reply string // Or a more structured reply if needed
+			args := ApplyWALUpdatesArgs{Updates: updates}
+			var reply ApplyWALUpdatesReply
 
-			// Example: Call a remote RPC method on the follower
-			// client.Call("FollowerService.ApplyWALUpdates", updates, &reply)
-			// Replace with actual RPC call once follower RPC service is defined.
-			r.logger.Printf("INFO: Simulating push of %d updates to follower %s. (Need to implement actual RPC call).", len(updates), id)
-			_ = reply // Placeholder to avoid unused variable warning
+			// Call the remote RPC method on the follower to apply WAL updates.
+			// The "WALReplicationServer" string assumes that the WALReplicationServer
+			// instance on the follower node will register itself as an RPC service.
+			err = client.Call("WALReplicationServer.ApplyWALUpdates", args, &reply)
+			if err != nil {
+				r.logger.Printf("ERROR: RPC call to follower %s failed: %v", id, err)
+				// Consider marking this follower as needing reconciliation or retrying.
+				return
+			}
 
-			// Update the last synced sequence number for this follower
+			if !reply.Success {
+				r.logger.Printf("ERROR: Follower %s failed to apply WAL updates: %s", id, reply.Message)
+				// Do not update sequence number if application failed.
+				return
+			}
+
+			// Update the last synced sequence number for this follower using the reply's LastSeqNum if available,
+			// otherwise use the latestSeqNum we attempted to push.
 			r.mu.Lock()
-			r.followerSequence[id] = latestSeqNum
+			if reply.LastSeqNum > 0 { // If follower returns its last synced seq num
+				r.followerSequence[id] = reply.LastSeqNum
+				r.logger.Printf("Successfully pushed %d updates to follower %s. Follower reported new synced sequence: %d", len(updates), id, reply.LastSeqNum)
+			} else { // Fallback if reply.LastSeqNum is not set by follower
+				r.followerSequence[id] = latestSeqNum
+				r.logger.Printf("Successfully pushed %d updates to follower %s. Assumed new synced sequence: %d", len(updates), id, latestSeqNum)
+			}
 			r.mu.Unlock()
-			r.logger.Printf("Successfully simulated push of updates to follower %s. New synced sequence: %d", id, latestSeqNum)
 
 		}(followerID, conn)
 	}

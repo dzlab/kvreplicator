@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/rpc"
 	"os"
 	"strconv"
 	"strings"
@@ -102,9 +103,19 @@ func (wrs *WALReplicationServer) Start() error {
 		wrs.replicator.Start()
 	}
 
+	// Register the WALReplicationServer as an RPC service
+	// This makes its methods callable via RPC, specifically for replication.
+	// We are using http.DefaultServeMux for RPC, which allows RPC and HTTP API to coexist
+	// on the same port, as `net/rpc/server` registers handlers on http.DefaultServeMux.
+	if err := rpc.Register(wrs); err != nil {
+		return fmt.Errorf("failed to register WALReplicationServer RPC: %w", err)
+	}
+	rpc.HandleHTTP() // This registers /_goRPC_ and /debug/rpc
+
 	wrs.logger.Printf("WALReplicationServer node %s started successfully.", wrs.config.NodeID)
 	wrs.logger.Printf("Internal address: %s", wrs.config.InternalBindAddress)
 	wrs.logger.Printf("HTTP API listening on: %s", wrs.config.HTTPAddr)
+	wrs.logger.Printf("RPC service listening on %s (via HTTP)", wrs.config.HTTPAddr)
 
 	// Setup HTTP server for API
 	mux := wrs.setupWALHTTPServerMux()
@@ -253,14 +264,13 @@ func (wrs *WALReplicationServer) GetStats() map[string]string {
 	// In a real implementation, this would return detailed WAL/replication stats.
 	// For now, it provides basic node information and status.
 	return map[string]string{
-		"node_id":            wrs.config.NodeID,
-		"status":             "running",
-		"http_address":       wrs.config.HTTPAddr,
-		"internal_address":   wrs.config.InternalBindAddress,
-		"data_dir":           wrs.config.DataDir,
-		"is_primary":         fmt.Sprintf("%t", wrs.IsPrimary()),
-		"current_primary":    wrs.GetPrimary(),
-		"replication_status": "replication logic not yet implemented",
+		"node_id":          wrs.config.NodeID,
+		"status":           "running",
+		"http_address":     wrs.config.HTTPAddr,
+		"internal_address": wrs.config.InternalBindAddress,
+		"data_dir":         wrs.config.DataDir,
+		"is_primary":       fmt.Sprintf("%t", wrs.IsPrimary()),
+		"current_primary":  wrs.GetPrimary(),
 		// Add more detailed stats here as features are implemented
 	}
 }
@@ -282,6 +292,47 @@ func (wrs *WALReplicationServer) GetUpdatesSince(sinceSeq uint64) ([]WALUpdate, 
 		return nil, err
 	}
 	return updates, nil
+}
+
+// ApplyWALUpdates is an RPC method that allows a primary node to push WAL updates to this follower.
+func (wrs *WALReplicationServer) ApplyWALUpdates(args ApplyWALUpdatesArgs, reply *ApplyWALUpdatesReply) error {
+	if wrs.IsPrimary() {
+		reply.Success = false
+		reply.Message = "This node is primary, cannot apply updates from another primary."
+		return fmt.Errorf("node %s is primary, refusing to apply WAL updates from another primary", wrs.config.NodeID)
+	}
+
+	wrs.logger.Printf("Received %d WAL updates for application.", len(args.Updates))
+	var lastAppliedSeq uint64 = 0
+
+	for _, update := range args.Updates {
+		var err error
+		switch update.Op {
+		case "put":
+			err = wrs.Put(update.Key, update.Value)
+		case "delete":
+			err = wrs.Delete(update.Key)
+		default:
+			wrs.logger.Printf("WARNING: Unknown WAL operation type: %s for SeqNum %d", update.Op, update.SeqNum)
+			continue // Skip unknown operations
+		}
+
+		if err != nil {
+			wrs.logger.Printf("ERROR: Failed to apply WAL update %s for key %s (seq %d): %v", update.Op, update.Key, update.SeqNum, err)
+			reply.Success = false
+			reply.Message = fmt.Sprintf("Failed to apply update for seq %d: %v", update.SeqNum, err)
+			// Return current lastAppliedSeq, indicating partial success up to this point
+			reply.LastSeqNum = lastAppliedSeq
+			return fmt.Errorf("failed to apply WAL update: %w", err)
+		}
+		lastAppliedSeq = update.SeqNum
+	}
+
+	reply.Success = true
+	reply.Message = "WAL updates applied successfully."
+	reply.LastSeqNum = lastAppliedSeq
+	wrs.logger.Printf("Successfully applied %d WAL updates. Last applied sequence: %d", len(args.Updates), lastAppliedSeq)
+	return nil
 }
 
 // --- HTTP Handler Methods ---
