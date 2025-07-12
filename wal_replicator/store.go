@@ -216,7 +216,7 @@ func (pbs *PebbleDBStore) GetUpdatesSince(sinceSeq uint64) ([]WALUpdate, error) 
 
 			currentSeqNum := baseSeqNum
 			for iter.First(); iter.Valid(); iter.Next() {
-				if currentSeqNum >= sinceSeq {
+				if currentSeqNum > sinceSeq { // Fetch updates strictly greater than sinceSeq
 					var op string
 					var value string
 					internalKey := base.DecodeInternalKey(iter.Key())
