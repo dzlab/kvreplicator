@@ -1,8 +1,10 @@
 package wal_replicator
 
 import (
+	"fmt"
 	"log"
 	"net/rpc"
+	"sort"
 	"sync"
 	"time"
 )
@@ -47,11 +49,11 @@ type Replicator struct {
 	walSource      WALSource      // Interface for WAL data access
 
 	// Replication state
-	followerConnections   map[string]*rpc.Client // Map of follower NodeID to RPC client connection
-	followerReceivedSeq   map[string]uint64      // Map of follower NodeID to their last *received* sequence number
-	followerAppliedSeq    map[string]uint64      // Map of follower NodeID to their last *applied* sequence number
-	committedSequenceNum  uint64                 // The highest sequence number committed by a quorum
-	mu                    sync.RWMutex           // Mutex for followerConnections, followerReceivedSeq, followerAppliedSeq, and committedSequenceNum
+	followerConnections  map[string]*rpc.Client // Map of follower NodeID to RPC client connection
+	followerReceivedSeq  map[string]uint64      // Map of follower NodeID to their last *received* sequence number
+	followerAppliedSeq   map[string]uint64      // Map of follower NodeID to their last *applied* sequence number
+	committedSequenceNum uint64                 // The highest sequence number committed by a quorum
+	mu                   sync.RWMutex           // Mutex for followerConnections, followerReceivedSeq, followerAppliedSeq, and committedSequenceNum
 
 	// Configuration for quorum (example, could be moved to WALConfig)
 	replicationQuorum int // Number of followers that must acknowledge an update for it to be considered committed
@@ -70,18 +72,18 @@ func NewReplicator(
 	walSource WALSource,
 ) *Replicator {
 	return &Replicator{
-		logger:                logger,
-		nodeID:                nodeID,
-		primaryChecker:        primaryChecker,
-		nodeRegistry:          nodeRegistry,
-		walSource:             walSource,
-		followerConnections:   make(map[string]*rpc.Client),
-		followerReceivedSeq:   make(map[string]uint64), // Initialize new map
-		followerAppliedSeq:    make(map[string]uint64),  // Initialize new map
-		committedSequenceNum:  0,                         // Initialize committed sequence number
-		replicationQuorum:     1,                         // Default to 1 for now (leader + 0 followers for 1-node quorum, adjust for N+1)
-		stopChan:              make(chan struct{}),
-		triggerReconcile:      make(chan struct{}, 1), // Buffered channel to avoid blocking sender
+		logger:               logger,
+		nodeID:               nodeID,
+		primaryChecker:       primaryChecker,
+		nodeRegistry:         nodeRegistry,
+		walSource:            walSource,
+		followerConnections:  make(map[string]*rpc.Client),
+		followerReceivedSeq:  make(map[string]uint64), // Initialize new map
+		followerAppliedSeq:   make(map[string]uint64), // Initialize new map
+		committedSequenceNum: 0,                       // Initialize committed sequence number
+		replicationQuorum:    1,                       // Default to 1 for now (leader + 0 followers for 1-node quorum, adjust for N+1)
+		stopChan:             make(chan struct{}),
+		triggerReconcile:     make(chan struct{}, 1), // Buffered channel to avoid blocking sender
 	}
 }
 
@@ -294,8 +296,7 @@ func (r *Replicator) pushWALUpdates() {
 	}
 
 	// Wait for replies from all RPC calls and update states
-	receivedCount := 0
-	appliedCount := 0
+
 	// We need to know how many actual replicas are there, including primary if it's part of quorum.
 	// A common quorum is N/2 + 1, where N is the total number of nodes (including primary).
 	// For this implementation, let's define replicationQuorum as the number of *followers*
@@ -350,10 +351,11 @@ func (r *Replicator) pushWALUpdates() {
 		case <-time.After(5 * time.Second): // Timeout for RPC replies from a single push
 			r.logger.Printf("Timeout waiting for some RPC replies. Some acknowledgments may be missed for this push cycle.")
 			// Break from the loop after timeout to process replies received so far.
-			break
+			goto EndQuorumCollection
 		}
 	}
 
+EndQuorumCollection:
 	// Determine the highest sequence number committed by a quorum.
 	// The primary is assumed to have applied `latestSeqNum` if it originated the operation.
 	// This function currently processes pushes, not individual client operations,
@@ -396,71 +398,5 @@ func (r *Replicator) pushWALUpdates() {
 		r.logger.Printf("Quorum NOT achieved for latest updates (Applied by %d nodes including primary, %d followers required beyond primary for commit).",
 			len(appliedByQuorum), requiredFollowerAcks)
 		// The primary's committedSequenceNum will not advance.
-	}
-
-	// No longer need this block, as RPC calls are now collecting replies via channels.
-	/*
-		// Original logic to update sequence number, now handled by replyChan processing
-		r.mu.Lock()
-		if reply.LastSeqNum > 0 { // If follower returns its last synced seq num
-			r.followerSequence[id] = reply.LastSeqNum
-			r.logger.Printf("Successfully pushed %d updates to follower %s. Follower reported new synced sequence: %d", len(updates), id, reply.LastSeqNum)
-		} else { // Fallback if reply.LastSeqNum is not set by follower
-			r.followerSequence[id] = latestSeqNum
-			r.logger.Printf("Successfully pushed %d updates to follower %s. Assumed new synced sequence: %d", len(updates), id, latestSeqNum)
-		}
-		r.mu.Unlock()
-	*/
-
-	// If there's an issue with one follower, it shouldn't block the whole replication
-	// (unless it's a quorum failure). Each go routine handles its own error logging.
-}
-
-			r.logger.Printf("Pushing updates to follower %s from sequence %d to %d", id, lastSyncedSeq, latestSeqNum)
-			updates, err := r.walSource.GetUpdatesSince(lastSyncedSeq)
-			if err != nil {
-				r.logger.Printf("ERROR: Failed to get WAL updates for follower %s from DB: %v", id, err)
-				return
-			}
-
-			if len(updates) == 0 {
-				// This can happen if latestSeqNum was from a read, but no actual new writes occurred since lastSyncedSeq.
-				// Or if updates were filtered out (e.g., internal-only ops).
-				// r.logger.Printf("No new WAL updates for follower %s since sequence %d.", id, lastSyncedSeq)
-				return
-			}
-
-			args := ApplyWALUpdatesArgs{Updates: updates}
-			var reply ApplyWALUpdatesReply
-
-			// Call the remote RPC method on the follower to apply WAL updates.
-			// The "WALReplicationServer" string assumes that the WALReplicationServer
-			// instance on the follower node will register itself as an RPC service.
-			err = client.Call("WALReplicationServer.ApplyWALUpdates", args, &reply)
-			if err != nil {
-				r.logger.Printf("ERROR: RPC call to follower %s failed: %v", id, err)
-				// Consider marking this follower as needing reconciliation or retrying.
-				return
-			}
-
-			if !reply.Success {
-				r.logger.Printf("ERROR: Follower %s failed to apply WAL updates: %s", id, reply.Message)
-				// Do not update sequence number if application failed.
-				return
-			}
-
-			// Update the last synced sequence number for this follower using the reply's LastSeqNum if available,
-			// otherwise use the latestSeqNum we attempted to push.
-			r.mu.Lock()
-			if reply.LastSeqNum > 0 { // If follower returns its last synced seq num
-				r.followerSequence[id] = reply.LastSeqNum
-				r.logger.Printf("Successfully pushed %d updates to follower %s. Follower reported new synced sequence: %d", len(updates), id, reply.LastSeqNum)
-			} else { // Fallback if reply.LastSeqNum is not set by follower
-				r.followerSequence[id] = latestSeqNum
-				r.logger.Printf("Successfully pushed %d updates to follower %s. Assumed new synced sequence: %d", len(updates), id, latestSeqNum)
-			}
-			r.mu.Unlock()
-
-		}(followerID, conn)
 	}
 }
