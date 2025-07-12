@@ -207,26 +207,56 @@ func (wrs *WALReplicationServer) Get(key string) (string, error) {
 }
 
 // Put sets a value for a given key in the local PebbleDB.
-// Note: This operation is NOT replicated to other nodes in this placeholder implementation.
+// If this node is the primary, it waits for the write to be committed by a quorum.
 func (wrs *WALReplicationServer) Put(key, value string) error {
-	wrs.logger.Printf("DB Put: key=%s, value=%s", key, value) // Using Printf for potentially noisy ops
+	wrs.logger.Printf("DB Put: key=%s, value=%s", key, value)
 	err := wrs.db.Put(key, value)
 	if err != nil {
 		return err
 	}
-	wrs.logger.Printf("Successfully set key %s", key)
+
+	if wrs.IsPrimary() && wrs.replicator != nil {
+		latestLocalSeq, err := wrs.db.GetLatestSequenceNumber()
+		if err != nil {
+			wrs.logger.Printf("WARNING: Failed to get latest sequence number after local Put: %v", err)
+			return fmt.Errorf("local put successful but failed to get latest seq: %w", err)
+		}
+		wrs.logger.Printf("Primary node local Put successful, waiting for quorum commit for SeqNum %d...", latestLocalSeq)
+		if err := wrs.waitForQuorumCommit(latestLocalSeq); err != nil {
+			wrs.logger.Printf("ERROR: Quorum commit failed for Put operation (key=%s, seq=%d): %v", key, latestLocalSeq, err)
+			return fmt.Errorf("put operation failed to reach quorum commit: %w", err)
+		}
+		wrs.logger.Printf("Primary node Put operation (key=%s, seq=%d) committed by quorum.", key, latestLocalSeq)
+	} else {
+		wrs.logger.Printf("Successfully set key %s (not primary or replicator not initialized, no quorum wait).", key)
+	}
 	return nil
 }
 
 // Delete removes a key from the local PebbleDB.
-// Note: This operation is NOT replicated to other nodes in this placeholder implementation.
+// If this node is the primary, it waits for the delete to be committed by a quorum.
 func (wrs *WALReplicationServer) Delete(key string) error {
-	wrs.logger.Printf("DB Delete: key=%s", key) // Using Printf for potentially noisy ops
+	wrs.logger.Printf("DB Delete: key=%s", key)
 	err := wrs.db.Delete(key)
 	if err != nil {
 		return err
 	}
-	wrs.logger.Printf("Successfully deleted key %s", key)
+
+	if wrs.IsPrimary() && wrs.replicator != nil {
+		latestLocalSeq, err := wrs.db.GetLatestSequenceNumber()
+		if err != nil {
+			wrs.logger.Printf("WARNING: Failed to get latest sequence number after local Delete: %v", err)
+			return fmt.Errorf("local delete successful but failed to get latest seq: %w", err)
+		}
+		wrs.logger.Printf("Primary node local Delete successful, waiting for quorum commit for SeqNum %d...", latestLocalSeq)
+		if err := wrs.waitForQuorumCommit(latestLocalSeq); err != nil {
+			wrs.logger.Printf("ERROR: Quorum commit failed for Delete operation (key=%s, seq=%d): %v", key, latestLocalSeq, err)
+			return fmt.Errorf("delete operation failed to reach quorum commit: %w", err)
+		}
+		wrs.logger.Printf("Primary node Delete operation (key=%s, seq=%d) committed by quorum.", key, latestLocalSeq)
+	} else {
+		wrs.logger.Printf("Successfully deleted key %s (not primary or replicator not initialized, no quorum wait).", key)
+	}
 	return nil
 }
 
@@ -322,7 +352,10 @@ func (wrs *WALReplicationServer) ApplyWALUpdates(args ApplyWALUpdatesArgs, reply
 			reply.Success = false
 			reply.Message = fmt.Sprintf("Failed to apply update for seq %d: %v", update.SeqNum, err)
 			// Return current lastAppliedSeq, indicating partial success up to this point
-			reply.LastSeqNum = lastAppliedSeq
+			if len(args.Updates) > 0 {
+				reply.ReceivedSeqNum = args.Updates[len(args.Updates)-1].SeqNum
+			}
+			reply.AppliedSeqNum = lastAppliedSeq
 			return fmt.Errorf("failed to apply WAL update: %w", err)
 		}
 		lastAppliedSeq = update.SeqNum
@@ -330,8 +363,14 @@ func (wrs *WALReplicationServer) ApplyWALUpdates(args ApplyWALUpdatesArgs, reply
 
 	reply.Success = true
 	reply.Message = "WAL updates applied successfully."
-	reply.LastSeqNum = lastAppliedSeq
-	wrs.logger.Printf("Successfully applied %d WAL updates. Last applied sequence: %d", len(args.Updates), lastAppliedSeq)
+	// ReceivedSeqNum is the highest sequence number in the batch that was *received*.
+	// This will be the last update in the batch if the batch is non-empty.
+	if len(args.Updates) > 0 {
+		reply.ReceivedSeqNum = args.Updates[len(args.Updates)-1].SeqNum
+	}
+	reply.AppliedSeqNum = lastAppliedSeq // AppliedSeqNum is the highest sequence number successfully *applied*.
+	wrs.logger.Printf("Successfully applied %d WAL updates. Last received sequence: %d, Last applied sequence: %d",
+		len(args.Updates), reply.ReceivedSeqNum, reply.AppliedSeqNum)
 	return nil
 }
 
@@ -451,4 +490,35 @@ func (wrs *WALReplicationServer) setupWALHTTPServerMux() *http.ServeMux {
 	mux.HandleFunc("/wal/seqnum", wrs.handleWALSeqNum)
 
 	return mux
+}
+
+// waitForQuorumCommit waits until the given sequence number is committed by a quorum of nodes.
+func (wrs *WALReplicationServer) waitForQuorumCommit(targetSeqNum uint64) error {
+	const (
+		pollInterval = 100 * time.Millisecond // How often to check for commit status
+		timeout      = 5 * time.Second        // Max time to wait for a commit
+	)
+
+	if wrs.replicator == nil {
+		return fmt.Errorf("replicator not initialized, cannot wait for quorum commit")
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			committedSeq := wrs.replicator.GetCommittedSequenceNumber()
+			if committedSeq >= targetSeqNum {
+				return nil // Target sequence number has been committed by quorum
+			}
+			wrs.logger.Printf("Waiting for SeqNum %d to be committed (current committed: %d)...", targetSeqNum, committedSeq)
+		case <-timer.C:
+			return fmt.Errorf("timeout waiting for sequence number %d to be committed by quorum", targetSeqNum)
+		}
+	}
 }
