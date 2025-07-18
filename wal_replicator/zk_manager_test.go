@@ -209,7 +209,7 @@ func TestZKManager_RegisterNode(t *testing.T) {
 
 	// Test successful registration (node does not exist initially)
 	mockConn.On("Exists", nodePath).Return(false, nil, nil).Once()
-	mockConn.On("Create", nodePath, []byte(zkm.internalBindAddress), zk.FlagEphemeral, zk.WorldACL(zk.PermAll)).Return(nodePath, nil).Once()
+	mockConn.On("Create", nodePath, []byte(zkm.internalBindAddress), int32(zk.FlagEphemeral), zk.WorldACL(zk.PermAll)).Return(nodePath, nil).Once()
 
 	err := zkm.RegisterNode()
 	assert.NoError(t, err)
@@ -220,7 +220,7 @@ func TestZKManager_RegisterNode(t *testing.T) {
 	zkm.conn = mockConn
 	mockConn.On("Exists", nodePath).Return(true, nil, nil).Once()
 	mockConn.On("Delete", nodePath, int32(-1)).Return(nil).Once()
-	mockConn.On("Create", nodePath, []byte(zkm.internalBindAddress), zk.FlagEphemeral, zk.WorldACL(zk.PermAll)).Return(nodePath, nil).Once()
+	mockConn.On("Create", nodePath, []byte(zkm.internalBindAddress), int32(zk.FlagEphemeral), zk.WorldACL(zk.PermAll)).Return(nodePath, nil).Once()
 
 	err = zkm.RegisterNode()
 	assert.NoError(t, err)
@@ -231,7 +231,7 @@ func TestZKManager_RegisterNode(t *testing.T) {
 	zkm.conn = mockConn
 	mockConn.On("Exists", nodePath).Return(true, nil, nil).Once()
 	mockConn.On("Delete", nodePath, int32(-1)).Return(zk.ErrNoNode).Once() // Simulate another process deleting it
-	mockConn.On("Create", nodePath, []byte(zkm.internalBindAddress), zk.FlagEphemeral, zk.WorldACL(zk.PermAll)).Return(nodePath, nil).Once()
+	mockConn.On("Create", nodePath, []byte(zkm.internalBindAddress), int32(zk.FlagEphemeral), zk.WorldACL(zk.PermAll)).Return(nodePath, nil).Once()
 
 	err = zkm.RegisterNode()
 	assert.NoError(t, err) // Should still succeed as create will be tried
@@ -241,7 +241,7 @@ func TestZKManager_RegisterNode(t *testing.T) {
 	mockConn = NewMockZKConn()
 	zkm.conn = mockConn
 	mockConn.On("Exists", nodePath).Return(false, nil, nil).Once()
-	mockConn.On("Create", nodePath, []byte(zkm.internalBindAddress), zk.FlagEphemeral, zk.WorldACL(zk.PermAll)).Return("", assert.AnError).Once()
+	mockConn.On("Create", nodePath, []byte(zkm.internalBindAddress), int32(zk.FlagEphemeral), zk.WorldACL(zk.PermAll)).Return("", assert.AnError).Once()
 
 	err = zkm.RegisterNode()
 	assert.Error(t, err)
