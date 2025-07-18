@@ -14,8 +14,11 @@ import (
 const primaryElectionPath = "/kvreplicator/wal/primary_election"
 const nodesPath = "/kvreplicator/wal/nodes" // Define nodesPath as a constant
 
-// zkConn interface abstracts the zk.Conn methods used by ZKManager for testability.
-type zkConn interface {
+type NodeChangeCallback func(map[string]string)
+
+// ZKConnection defines the interface for ZooKeeper connection operations used by ZKManager.
+// This allows for easier mocking in tests.
+type ZKConnection interface {
 	Create(path string, data []byte, flags int32, acl []zk.ACL) (string, error)
 	Exists(path string) (bool, *zk.Stat, error)
 	Get(path string) ([]byte, *zk.Stat, error)
@@ -26,20 +29,17 @@ type zkConn interface {
 	Close()
 }
 
-// NodeChangeCallback is a function type for callbacks when the active node list changes.
-// It receives the updated map of active nodes (nodeID -> internalBindAddress).
-type NodeChangeCallback func(map[string]string)
-
 // ZKManager handles ZooKeeper operations for WALReplicationServer.
 type ZKManager struct {
-	conn                zkConn // Use the interface type here
+	conn                ZKConnection
 	logger              *log.Logger
 	nodeID              string
-	internalBindAddress string             // Store internal bind address for re-registration
-	activeNodes         map[string]string  // Map of nodeID to internalBindAddress, managed by ZK events
-	electionNodePath    string             // Stores the path of this node's ephemeral sequential node for primary election
-	mu                  sync.RWMutex       // Mutex to protect activeNodes
-	nodeChangeCallback  NodeChangeCallback // Callback to notify on node list changes
+	internalBindAddress string                                                               // Store internal bind address for re-registration
+	activeNodes         map[string]string                                                    // Map of nodeID to internalBindAddress, managed by ZK events
+	electionNodePath    string                                                               // Stores the path of this node's ephemeral sequential node for primary election
+	mu                  sync.RWMutex                                                         // Mutex to protect activeNodes
+	nodeChangeCallback  NodeChangeCallback                                                   // Callback to notify on node list changes
+	connectFunc         func([]string, time.Duration) (ZKConnection, <-chan zk.Event, error) // Function to establish ZK connection, allowing mock injection
 }
 
 // NewZKManager creates a new ZKManager instance.
@@ -51,6 +51,11 @@ func NewZKManager(logger *log.Logger, nodeID string, callback NodeChangeCallback
 		activeNodes:        make(map[string]string),
 		mu:                 sync.RWMutex{},
 		nodeChangeCallback: callback,
+		connectFunc: func(zkServers []string, recvTimeout time.Duration) (ZKConnection, <-chan zk.Event, error) {
+			conn, eventChan, err := zk.Connect(zkServers, recvTimeout)
+			// zk.Connect returns *zk.Conn, which implements ZKConnection
+			return conn, eventChan, err
+		},
 	}
 }
 
@@ -62,12 +67,11 @@ func (zkm *ZKManager) Connect(zkServers []string) error {
 	}
 
 	zkm.logger.Printf("Connecting to ZooKeeper at %v...", zkServers)
-	conn, _, err := zk.Connect(zkServers, time.Second*10) // 10-second timeout for connection
+	conn, _, err := zkm.connectFunc(zkServers, time.Second*10) // Use the injected connectFunc
 	if err != nil {
 		zkm.logger.Printf("ERROR: Failed to connect to ZooKeeper: %v", err)
 		return fmt.Errorf("failed to connect to zookeeper: %w", err)
 	}
-	// Assigning the concrete *zk.Conn to the zkConn interface type.
 	zkm.conn = conn
 	zkm.logger.Println("ZooKeeper connection established.")
 

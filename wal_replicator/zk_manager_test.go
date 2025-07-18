@@ -120,37 +120,63 @@ func TestNewZKManager(t *testing.T) {
 
 func TestZKManager_Connect(t *testing.T) {
 	logger := log.New(os.Stdout, "TEST: ", log.LstdFlags)
-	zkm := NewZKManager(logger, "test-node", nil)
 
-	mockConn := NewMockZKConn()
-	zkm.conn = mockConn // Manually set the mock connection
+	// Test 1: Successful connection and path creation
+	t.Run("SuccessfulConnectionAndPathCreation", func(t *testing.T) {
+		mockConn := NewMockZKConn()
+		zkm := NewZKManager(logger, "test-node-1", nil)
 
-	// Test successful connection and path creation
-	mockConn.On("Exists", mock.AnythingOfType("string")).Return(false, nil, nil).Times(4) // For all 4 paths
-	mockConn.On("Create", mock.AnythingOfType("string"), mock.Anything, int32(0), zk.WorldACL(zk.PermAll)).Return("/path", nil).Times(4)
+		// Override the connectFunc to return our mock connection
+		zkm.connectFunc = func(servers []string, recvTimeout time.Duration) (ZKConnection, <-chan zk.Event, error) {
+			return mockConn, make(chan zk.Event), nil // Return mockConn and a dummy channel
+		}
 
-	err := zkm.Connect([]string{"localhost:2181"}) // The actual ZK servers don't matter for the mock
-	assert.NoError(t, err)
-	assert.Equal(t, mockConn, zkm.conn) // Ensure the mock conn is still set
+		// Expectations for base path existence and creation
+		mockConn.On("Exists", mock.AnythingOfType("string")).Return(false, nil, nil).Times(4) // For all 4 paths
+		mockConn.On("Create", mock.AnythingOfType("string"), mock.Anything, int32(0), zk.WorldACL(zk.PermAll)).Return("/path", nil).Times(4)
 
-	mockConn.AssertExpectations(t)
+		err := zkm.Connect([]string{"localhost:2181"})
+		assert.NoError(t, err)
+		assert.Equal(t, mockConn, zkm.conn) // Ensure the mock conn is set by connectFunc
 
-	// Test when paths already exist
-	mockConn = NewMockZKConn()
-	zkm.conn = mockConn
-	mockConn.On("Exists", mock.AnythingOfType("string")).Return(true, nil, nil).Times(4)
-	mockConn.On("Create", mock.AnythingOfType("string"), mock.Anything, int32(0), zk.WorldACL(zk.PermAll)).Return("", zk.ErrNodeExists).Times(0) // Should not be called if exists is true
+		mockConn.AssertExpectations(t)
+	})
 
-	err = zkm.Connect([]string{"localhost:2181"})
-	assert.NoError(t, err)
-	mockConn.AssertExpectations(t)
+	// Test 2: Paths already exist
+	t.Run("PathsAlreadyExist", func(t *testing.T) {
+		mockConn := NewMockZKConn()
+		zkm := NewZKManager(logger, "test-node-2", nil)
 
-	// Test connection failure (simulated by not setting mockConn for real zk.Connect)
-	zkm.conn = nil // Reset conn to simulate initial state
-	err = zkm.Connect([]string{"invalid-zk-address"})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to connect to zookeeper")
-	assert.Nil(t, zkm.conn) // Conn should remain nil on failure
+		// Override the connectFunc to return our mock connection
+		zkm.connectFunc = func(servers []string, recvTimeout time.Duration) (ZKConnection, <-chan zk.Event, error) {
+			return mockConn, make(chan zk.Event), nil
+		}
+
+		// Expectations: Exists returns true, Create should not be called
+		mockConn.On("Exists", mock.AnythingOfType("string")).Return(true, nil, nil).Times(4)
+
+		err := zkm.Connect([]string{"localhost:2181"})
+		assert.NoError(t, err)
+		assert.Equal(t, mockConn, zkm.conn)
+
+		mockConn.AssertExpectations(t)
+	})
+
+	// Test 3: Connection failure
+	t.Run("ConnectionFailure", func(t *testing.T) {
+		zkm := NewZKManager(logger, "test-node-3", nil)
+
+		// Override the connectFunc to simulate connection error
+		expectedErr := fmt.Errorf("simulated connection error")
+		zkm.connectFunc = func(servers []string, recvTimeout time.Duration) (ZKConnection, <-chan zk.Event, error) {
+			return nil, nil, expectedErr
+		}
+
+		err := zkm.Connect([]string{"invalid-zk-address"})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to connect to zookeeper")
+		assert.Nil(t, zkm.conn) // Conn should remain nil on failure
+	})
 }
 
 func TestZKManager_Close(t *testing.T) {
