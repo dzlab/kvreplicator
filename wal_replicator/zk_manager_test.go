@@ -331,7 +331,7 @@ func TestZKManager_ElectPrimary(t *testing.T) {
 
 		// Expectations for creating election node
 		mockConn.On("Exists", mock.AnythingOfType("string")).Return(false, nil, nil).Maybe() // For existing election node check
-		mockConn.On("Create", fmt.Sprintf("%s/node-", baseElectionPath), []byte(zkm.internalBindAddress), zk.FlagEphemeral|zk.FlagSequence, zk.WorldACL(zk.PermAll)).Return(baseElectionPath+"/node-0000000000", nil).Once()
+		mockConn.On("Create", fmt.Sprintf("%s/node-", baseElectionPath), []byte(zkm.internalBindAddress), int32(zk.FlagEphemeral|zk.FlagSequence), zk.WorldACL(zk.PermAll)).Return(baseElectionPath+"/node-0000000000", nil).Once()
 
 		// Expectations for getting children (this node is the first)
 		mockConn.On("Children", baseElectionPath).Return([]string{"node-0000000000", "node-0000000001", "node-0000000002"}, nil, nil).Once()
@@ -364,7 +364,7 @@ func TestZKManager_ElectPrimary(t *testing.T) {
 
 		// Expectations for creating election node
 		mockConn.On("Exists", mock.AnythingOfType("string")).Return(false, nil, nil).Maybe()
-		mockConn.On("Create", fmt.Sprintf("%s/node-", baseElectionPath), []byte(zkm.internalBindAddress), zk.FlagEphemeral|zk.FlagSequence, zk.WorldACL(zk.PermAll)).Return(myNodePath, nil).Once()
+		mockConn.On("Create", fmt.Sprintf("%s/node-", baseElectionPath), []byte(zkm.internalBindAddress), int32(zk.FlagEphemeral|zk.FlagSequence), zk.WorldACL(zk.PermAll)).Return(myNodePath, nil).Once()
 
 		// Expectations for getting children
 		mockConn.On("Children", baseElectionPath).Return(electionNodes, nil, nil).Once()
@@ -398,7 +398,7 @@ func TestZKManager_ElectPrimary(t *testing.T) {
 
 		// First call to ElectPrimary:
 		// Create node
-		mockConn.On("Create", fmt.Sprintf("%s/node-", baseElectionPath), []byte(zkm.internalBindAddress), zk.FlagEphemeral|zk.FlagSequence, zk.WorldACL(zk.PermAll)).Return(myNodePath, nil).Once()
+		mockConn.On("Create", fmt.Sprintf("%s/node-", baseElectionPath), []byte(zkm.internalBindAddress), int32(zk.FlagEphemeral|zk.FlagSequence), zk.WorldACL(zk.PermAll)).Return(myNodePath, nil).Once()
 		// Get children
 		mockConn.On("Children", baseElectionPath).Return(electionNodes, nil, nil).Once()
 		// Get primary data
@@ -432,7 +432,7 @@ func TestZKManager_ElectPrimary(t *testing.T) {
 
 		// First Children call: return empty, triggers retry
 		mockConn.On("Exists", mock.AnythingOfType("string")).Return(false, nil, nil).Maybe()
-		mockConn.On("Create", fmt.Sprintf("%s/node-", baseElectionPath), mock.Anything, mock.Anything, mock.Anything).Return(myNodePath, nil).Once()
+		mockConn.On("Create", fmt.Sprintf("%s/node-", baseElectionPath), mock.Anything, mock.Anything, mock.Anything).Return(myNodePath, nil).Times(2)
 		mockConn.On("Children", baseElectionPath).Return([]string{}, nil, nil).Once() // First attempt: no children
 
 		// Second Children call (after retry): return children, this node is primary
