@@ -18,9 +18,22 @@ const nodesPath = "/kvreplicator/wal/nodes" // Define nodesPath as a constant
 // It receives the updated map of active nodes (nodeID -> internalBindAddress).
 type NodeChangeCallback func(map[string]string)
 
+// ZKConnection defines the interface for ZooKeeper operations required by ZKManager.
+// This allows for mocking the ZooKeeper connection in tests.
+type ZKConnection interface {
+	ChildrenW(path string) ([]string, *zk.Stat, <-chan zk.Event, error)
+	Get(path string) ([]byte, *zk.Stat, error)
+	Exists(path string) (bool, *zk.Stat, error)
+	Create(path string, data []byte, flags int32, acl []zk.ACL) (string, error)
+	Delete(path string, version int32) error
+	Children(path string) ([]string, *zk.Stat, error)
+	ExistsW(path string) (bool, *zk.Stat, <-chan zk.Event, error)
+	Close()
+}
+
 // ZKManager handles ZooKeeper operations for WALReplicationServer.
 type ZKManager struct {
-	conn                *zk.Conn
+	conn                ZKConnection
 	logger              *log.Logger
 	nodeID              string
 	internalBindAddress string             // Store internal bind address for re-registration
@@ -55,6 +68,7 @@ func (zkm *ZKManager) Connect(zkServers []string) error {
 		zkm.logger.Printf("ERROR: Failed to connect to ZooKeeper: %v", err)
 		return fmt.Errorf("failed to connect to zookeeper: %w", err)
 	}
+	// Assign the concrete *zk.Conn to the ZKConnection interface
 	zkm.conn = conn
 	zkm.logger.Println("ZooKeeper connection established.")
 

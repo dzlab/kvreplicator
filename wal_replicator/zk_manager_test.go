@@ -1,11 +1,15 @@
 package wal_replicator
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"reflect"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/go-zookeeper/zk"
 )
 
 // mockNodeChangeCallback is a dummy callback function for testing purposes.
@@ -135,4 +139,164 @@ func TestGetActiveNodes(t *testing.T) {
 			}
 		})
 	})
+}
+
+// mockZKConnection is a mock implementation of the ZKConnection interface for testing.
+type mockZKConnection struct {
+	childrenWFunc func(path string) ([]string, *zk.Stat, <-chan zk.Event, error)
+	getFunc       func(path string) ([]byte, *zk.Stat, error)
+	existsFunc    func(path string) (bool, *zk.Stat, error)
+	createFunc    func(path string, data []byte, flags int32, acl []zk.ACL) (string, error)
+	deleteFunc    func(path string, version int32) error
+	childrenFunc  func(path string) ([]string, *zk.Stat, error)
+	existsWFunc   func(path string) (bool, *zk.Stat, <-chan zk.Event, error)
+	closeFunc     func()
+}
+
+// Ensure mockZKConnection implements ZKConnection
+var _ ZKConnection = (*mockZKConnection)(nil)
+
+func (m *mockZKConnection) ChildrenW(path string) ([]string, *zk.Stat, <-chan zk.Event, error) {
+	if m.childrenWFunc != nil {
+		return m.childrenWFunc(path)
+	}
+	return nil, nil, nil, fmt.Errorf("ChildrenW not implemented")
+}
+func (m *mockZKConnection) Get(path string) ([]byte, *zk.Stat, error) {
+	if m.getFunc != nil {
+		return m.getFunc(path)
+	}
+	return nil, nil, fmt.Errorf("Get not implemented")
+}
+func (m *mockZKConnection) Exists(path string) (bool, *zk.Stat, error) {
+	if m.existsFunc != nil {
+		return m.existsFunc(path)
+	}
+	return false, nil, fmt.Errorf("Exists not implemented")
+}
+func (m *mockZKConnection) Create(path string, data []byte, flags int32, acl []zk.ACL) (string, error) {
+	if m.createFunc != nil {
+		return m.createFunc(path, data, flags, acl)
+	}
+	return "", fmt.Errorf("Create not implemented")
+}
+func (m *mockZKConnection) Delete(path string, version int32) error {
+	if m.deleteFunc != nil {
+		return m.deleteFunc(path, version)
+	}
+	return fmt.Errorf("Delete not implemented")
+}
+func (m *mockZKConnection) Children(path string) ([]string, *zk.Stat, error) {
+	if m.childrenFunc != nil {
+		return m.childrenFunc(path)
+	}
+	return nil, nil, fmt.Errorf("Children not implemented")
+}
+func (m *mockZKConnection) ExistsW(path string) (bool, *zk.Stat, <-chan zk.Event, error) {
+	if m.existsWFunc != nil {
+		return m.existsWFunc(path)
+	}
+	return false, nil, nil, fmt.Errorf("ExistsW not implemented")
+}
+func (m *mockZKConnection) Close() {
+	if m.closeFunc != nil {
+		m.closeFunc()
+	}
+}
+
+// TestHandleZkEvents_NodeChildrenChanged tests the ZKManager's ability to react
+// to zk.EventNodeChildrenChanged events by attempting to refresh active nodes
+// and invoking the nodeChangeCallback.
+func TestHandleZkEvents_NodeChildrenChanged(t *testing.T) {
+	logger := log.New(os.Stdout, "TEST_EVENTS: ", log.LstdFlags)
+	nodeID := "test-event-node"
+
+	var receivedNodes map[string]string
+	callbackCalled := make(chan struct{})
+
+	mockCallback := func(nodes map[string]string) {
+		receivedNodes = nodes
+		close(callbackCalled)
+	}
+
+	zkm := NewZKManager(logger, nodeID, mockCallback)
+	zkm.internalBindAddress = "127.0.0.1:9090"
+
+	// Mock the ZKConnection for this test
+	mockConn := &mockZKConnection{}
+
+	// Channels for watch events
+	nodeEventWatchChan := make(chan zk.Event, 1) // Buffered to prevent deadlock on send
+	// We only expect ChildrenW to be called once by watchActiveNodes initially
+	// or on re-watch. Simulate a children list and the event channel for the next watch.
+	mockConn.childrenWFunc = func(path string) ([]string, *zk.Stat, <-chan zk.Event, error) {
+		if path == nodesPath {
+			// Return some mock children and the event channel for future watches
+			mockChildren := []string{"node1", "node2"}
+			return mockChildren, &zk.Stat{}, nodeEventWatchChan, nil
+		}
+		return nil, nil, nil, fmt.Errorf("unexpected ChildrenW path: %s", path)
+	}
+
+	// Simulate Get calls for the mock children
+	mockConn.getFunc = func(path string) ([]byte, *zk.Stat, error) {
+		switch path {
+		case fmt.Sprintf("%s/%s", nodesPath, "node1"):
+			return []byte("192.168.0.1:8080"), &zk.Stat{}, nil
+		case fmt.Sprintf("%s/%s", nodesPath, "node2"):
+			return []byte("192.168.0.2:8080"), &zk.Stat{}, nil
+		default:
+			return nil, nil, fmt.Errorf("unexpected Get path: %s", path)
+		}
+	}
+
+	// Assign the mock connection to the ZKManager
+	zkm.conn = mockConn
+
+	// Create channels that handleZkEvents will listen to.
+	// These would normally be returned by ElectPrimary and watchActiveNodes.
+	mockElectionEvents := make(chan zk.Event)
+	// The `nodeEventWatchChan` returned by `mockConn.childrenWFunc` is what `handleZkEvents` will listen to.
+
+	// Start the event handler goroutine.
+	go zkm.handleZkEvents(mockElectionEvents, nodeEventWatchChan)
+
+	// Simulate an initial successful watch and update.
+	// This is implicitly handled by the first call to watchActiveNodes from Start().
+	// For this test, we are directly sending the event AFTER `handleZkEvents` starts.
+	// The `watchActiveNodes` will be triggered by the `handleNodesEvent` function.
+
+	// Give time for handleZkEvents to start and potentially make its initial watch.
+	time.Sleep(100 * time.Millisecond)
+
+	// Simulate a zk.EventNodeChildrenChanged event for the nodes path.
+	simulatedEvent := zk.Event{
+		Type: zk.EventNodeChildrenChanged,
+		Path: nodesPath, // Corresponds to the path watched by watchActiveNodes
+	}
+
+	// Send the simulated event to the nodeEvents channel.
+	nodeEventWatchChan <- simulatedEvent
+
+	// Wait for the callback to be invoked or timeout.
+	select {
+	case <-callbackCalled:
+		t.Log("NodeChangeCallback was invoked.")
+		expectedNodes := map[string]string{
+			"node1": "192.168.0.1:8080",
+			"node2": "192.168.0.2:8080",
+		}
+		if !reflect.DeepEqual(receivedNodes, expectedNodes) {
+			t.Errorf("Received nodes mismatch. Expected %v, got %v", expectedNodes, receivedNodes)
+		}
+	case <-time.After(time.Second * 3):
+		t.Fatal("Timed out waiting for NodeChangeCallback to be invoked after EventNodeChildrenChanged.")
+	}
+
+	// Close channels to signal the handleZkEvents goroutine to exit cleanly.
+	close(nodeEventWatchChan)
+	close(mockElectionEvents)
+
+	// Give the goroutine a moment to finish
+	time.Sleep(100 * time.Millisecond)
 }
