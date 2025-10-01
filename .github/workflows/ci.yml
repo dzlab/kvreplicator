@@ -20,7 +20,7 @@ jobs:
           path: kvreplicator
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: "kvreplicator/go.mod" # Path to your go.mod file
 
